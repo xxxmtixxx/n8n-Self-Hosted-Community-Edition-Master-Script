@@ -34,7 +34,7 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 
 ### 1. Download the Master Script
 ```bash
-wget https://raw.githubusercontent.com/xxxmtixxx/n8n-Self-Hosted-Master-Script/main/n8n-master.sh
+wget https://raw.githubusercontent.com/xxxmtixxx/n8n-Self-Hosted-Community-Edition-Master-Script/main/n8n-master.sh
 # or create it manually:
 nano n8n-master.sh
 # Then paste the script content and save (Ctrl+X, Y, Enter)

@@ -107,6 +107,72 @@ get_status() {
     fi
 }
 
+# Enhanced certificate generation with multiple IP addresses and SAN support
+generate_ssl_certificate() {
+    local cert_dir="$1"
+    local key_file="$2"
+    local cert_file="$3"
+    
+    log_info "Generating enhanced SSL certificate with multiple IP address support..."
+    
+    # Auto-detect all non-loopback IP addresses
+    local all_ips=($(hostname -I | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$'))
+    log_debug "Detected IP addresses: ${all_ips[*]}"
+    
+    # Create temporary OpenSSL config file for SAN support
+    local ssl_config=$(mktemp)
+    cat > "$ssl_config" << EOF
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+C = US
+ST = State
+L = City
+O = Organization
+CN = n8n.local
+
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = n8n.local
+DNS.2 = localhost
+IP.1 = 127.0.0.1
+EOF
+
+    # Add all detected IPs to the SAN section
+    local ip_counter=2
+    for ip in "${all_ips[@]}"; do
+        echo "IP.$ip_counter = $ip" >> "$ssl_config"
+        ((ip_counter++))
+    done
+
+    # Generate certificate with SAN extensions
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "$key_file" \
+        -out "$cert_file" \
+        -config "$ssl_config" \
+        -extensions v3_req \
+        2>/dev/null
+    
+    # Set proper permissions
+    chmod 644 "$cert_file"
+    chmod 600 "$key_file"
+    
+    # Cleanup temporary config
+    rm -f "$ssl_config"
+    
+    log_success "SSL certificate created with SAN support:"
+    log_info "  - Domains: n8n.local, localhost"
+    log_info "  - IP addresses: 127.0.0.1, ${all_ips[*]}"
+    log_info "  - Valid for 10 years"
+}
+
 # Built-in backup function with comprehensive logging
 create_backup() {
     log_function_start "create_backup"
@@ -599,6 +665,7 @@ restore_backup() {
     return 0
 }
 
+
 # Built-in management menu
 show_management_menu() {
     while true; do
@@ -768,22 +835,16 @@ show_version() {
 
 # Renew certificate
 renew_certificate() {
-    log_info "Renewing self-signed certificate..."
+    log_info "Renewing SSL certificate with enhanced features..."
     cd "$N8N_DIR"
     
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout certs/n8n.key.new \
-        -out certs/n8n.crt.new \
-        -subj "/C=US/ST=State/L=City/O=Organization/CN=n8n.local" \
-        2>/dev/null
+    # Generate new certificate with enhanced features (IP addresses + SAN)
+    generate_ssl_certificate "$N8N_DIR/certs" certs/n8n.key.new certs/n8n.crt.new
     
     mv certs/n8n.key certs/n8n.key.old
     mv certs/n8n.crt certs/n8n.crt.old
     mv certs/n8n.key.new certs/n8n.key
     mv certs/n8n.crt.new certs/n8n.crt
-    
-    chmod 644 certs/n8n.crt
-    chmod 600 certs/n8n.key
     
     docker compose restart nginx
     printf "${GREEN}Certificate renewed for another 10 years${NC}\n"
@@ -1093,13 +1154,7 @@ deploy_n8n() {
     
     # Generate certificates
     if [ ! -f "$N8N_DIR/certs/n8n.crt" ]; then
-        log_info "Creating self-signed certificate..."
-        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-            -keyout "$N8N_DIR/certs/n8n.key" \
-            -out "$N8N_DIR/certs/n8n.crt" \
-            -subj "/C=US/ST=State/L=City/O=Organization/CN=n8n.local" \
-            2>/dev/null
-        log_info "Self-signed certificate created (valid for 10 years)"
+        generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
     fi
     
     # Create environment file if not restored

@@ -7,7 +7,7 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 - **All-in-One Script**: Single master script for deployment, management, and uninstallation (no separate files)
 - **Smart Installation**: Auto-detects installation state and offers appropriate options
 - **Data Preservation**: Choose which backup to restore when multiple are available
-- **Secure by Default**: Self-signed SSL certificate with 10-year validity
+- **Secure by Default**: Self-signed SSL certificate with 10-year validity and multiple IP address support
 - **Complete Environment Management**: Add/update/remove variables with automatic docker-compose.yml updates and service recreation
 - **Automated Backups**: Daily backups with configurable retention (default: 5 backups)
 - **Comprehensive Logging**: All operations logged to `~/n8n-operations.log` with timestamps
@@ -148,11 +148,12 @@ The following variables cannot be removed (protection built-in):
 
 ## 🌐 Access Methods
 
-After deployment, access n8n using:
+After deployment, access n8n using any of these methods. The SSL certificate includes all network IP addresses for seamless access:
 
 ### 1. Local Access (On the Server)
 ```
 https://localhost
+https://127.0.0.1
 ```
 
 ### 2. SSH Tunnel (Recommended for Remote Access)
@@ -161,11 +162,14 @@ ssh -L 8443:localhost:443 username@server-ip
 ```
 Then visit: `https://localhost:8443`
 
-### 3. Internal Network Access
+### 3. Internal Network Access (All Network Interfaces)
 ```
 https://YOUR_SERVER_IP
 ```
-Example: `https://192.168.1.200`
+Examples: 
+- `https://192.168.1.200` (LAN IP)
+- `https://10.0.1.100` (VPN or secondary network)
+- All detected network interfaces are included in the certificate
 
 **Note**: Port 443 is only exposed internally. For internet access, use SSH tunneling or configure additional security measures.
 
@@ -316,10 +320,12 @@ Shows:
 - Backup count and total size
 
 ### Certificate Management
-SSL certificates are automatically managed:
+SSL certificates are automatically managed with enhanced features:
 - Self-signed certificates valid for 10 years
+- **Multiple IP address support** - includes all network interfaces automatically
+- **SAN (Subject Alternative Names)** - covers n8n.local, localhost, and all detected IPs
 - Automatic renewal check via cron (30 days before expiry)
-- Manual renewal option in management menu
+- Manual renewal option in management menu (maintains enhanced features)
 
 ### Service Recreation
 Important for environment variable changes:
@@ -404,7 +410,7 @@ openssl x509 -in ~/n8n/certs/n8n.crt -noout -dates
 
 ## 🔒 Security Notes
 
-1. **Self-Signed Certificate**: Browser warnings are normal. Add exception to proceed.
+1. **Self-Signed Certificate**: Browser warnings are normal. Certificates include all network IP addresses for seamless access. Add exception to proceed.
 2. **Local Network Only**: No external ports exposed by default
 3. **Sensitive Data**: 
    - `.env` file has 600 permissions
@@ -454,6 +460,7 @@ tail -100 ~/n8n-operations.log
 ## 🆕 Recent Improvements (v2.0.0)
 
 - **Unified Architecture**: Single master script with all functions built-in
+- **Enhanced SSL Certificates**: Multiple IP address support with SAN extensions for seamless access
 - **Comprehensive Logging**: All operations logged with timestamps
 - **Automatic Service Recreation**: Environment variable management prompts for immediate service recreation
 - **Backup Unification**: Consistent backup format across all operations

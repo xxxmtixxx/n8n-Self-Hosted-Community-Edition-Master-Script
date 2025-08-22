@@ -1,4 +1,4 @@
-# n8n Self-Hosted Master Script - Complete Lifecycle Management
+# n8n Self-Hosted Community Edition Master Script - Complete Lifecycle Management
 
 A comprehensive master script for deploying, managing, and maintaining n8n with PostgreSQL, Nginx, and automated features. This all-in-one solution handles installation, updates, backups, uninstallation, and complete environment management with no external port exposure required.
 

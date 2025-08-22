@@ -173,9 +173,8 @@ Examples:
 
 **Note**: Port 443 is only exposed internally. For internet access, use SSH tunneling or configure additional security measures.
 
-**Default Credentials**:
-- Username: `admin`
-- Password: *[set during installation]*
+**Authentication**:
+n8n uses email/password authentication. You'll create your credentials during the initial n8n setup when you first access the interface.
 
 ## 📁 File Locations
 

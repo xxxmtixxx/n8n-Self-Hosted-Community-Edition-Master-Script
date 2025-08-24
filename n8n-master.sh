@@ -120,10 +120,13 @@ generate_ssl_certificate() {
     local all_ips=($(hostname -I | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$'))
     log_debug "Detected IP addresses: ${all_ips[*]}"
     
-    # Get external domain from environment if available
-    local external_domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
-    if [ -n "$external_domain" ]; then
-        log_debug "Including external domain in self-signed certificate: $external_domain"
+    # Get external domain from environment if available (only if .env file exists)
+    local external_domain=""
+    if [ -f "$N8N_DIR/.env" ]; then
+        external_domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+        if [ -n "$external_domain" ]; then
+            log_debug "Including external domain in self-signed certificate: $external_domain"
+        fi
     fi
     
     # Create temporary OpenSSL config file for SAN support

@@ -114,11 +114,17 @@ generate_ssl_certificate() {
     local key_file="$2"
     local cert_file="$3"
     
-    log_info "Generating enhanced SSL certificate with multiple IP address support..."
+    log_info "Generating enhanced SSL certificate with comprehensive domain and IP support..."
     
     # Auto-detect all non-loopback IP addresses
     local all_ips=($(hostname -I | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$'))
     log_debug "Detected IP addresses: ${all_ips[*]}"
+    
+    # Get external domain from environment if available
+    local external_domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
+    if [ -n "$external_domain" ]; then
+        log_debug "Including external domain in self-signed certificate: $external_domain"
+    fi
     
     # Create temporary OpenSSL config file for SAN support
     local ssl_config=$(mktemp)
@@ -146,11 +152,18 @@ DNS.2 = localhost
 IP.1 = 127.0.0.1
 EOF
 
+    # Add external domain if configured
+    local dns_counter=3
+    if [ -n "$external_domain" ]; then
+        echo "DNS.$dns_counter = $external_domain" >> "$ssl_config"
+        ((dns_counter++)) || true
+    fi
+
     # Add all detected IPs to the SAN section
     local ip_counter=2
     for ip in "${all_ips[@]}"; do
         echo "IP.$ip_counter = $ip" >> "$ssl_config"
-        ((ip_counter++))
+        ((ip_counter++)) || true
     done
 
     # Generate certificate with SAN extensions
@@ -168,10 +181,290 @@ EOF
     # Cleanup temporary config
     rm -f "$ssl_config"
     
-    log_success "SSL certificate created with SAN support:"
-    log_info "  - Domains: n8n.local, localhost"
+    log_success "SSL certificate created with comprehensive SAN support:"
+    local domain_list="n8n.local, localhost"
+    if [ -n "$external_domain" ]; then
+        domain_list="$domain_list, $external_domain"
+    fi
+    log_info "  - Domains: $domain_list"
     log_info "  - IP addresses: 127.0.0.1, ${all_ips[*]}"
     log_info "  - Valid for 10 years"
+}
+
+# Generate self-signed certificate with dedicated naming
+generate_self_signed_certificate() {
+    log_info "Generating self-signed certificate for internal access (IPs, localhost, .local domains)..."
+    generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n-selfsigned.key" "$N8N_DIR/certs/n8n-selfsigned.crt"
+    log_success "Self-signed certificate generated: n8n-selfsigned.crt/key"
+}
+
+# Update environment with certificate status
+update_env_with_certificate_status() {
+    local cert_type="$1"
+    local letsencrypt_enabled="$2"
+    
+    # Update or add LETSENCRYPT_ENABLED flag
+    if grep -q "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env"; then
+        sed -i "s/^LETSENCRYPT_ENABLED=.*/LETSENCRYPT_ENABLED=$letsencrypt_enabled/" "$N8N_DIR/.env"
+    else
+        echo "LETSENCRYPT_ENABLED=$letsencrypt_enabled" >> "$N8N_DIR/.env"
+    fi
+    
+    # Update CERTIFICATE_TYPE
+    if grep -q "^CERTIFICATE_TYPE=" "$N8N_DIR/.env"; then
+        sed -i "s/^CERTIFICATE_TYPE=.*/CERTIFICATE_TYPE=$cert_type/" "$N8N_DIR/.env"
+    else
+        echo "CERTIFICATE_TYPE=$cert_type" >> "$N8N_DIR/.env"
+    fi
+    
+    log_debug "Environment updated: CERTIFICATE_TYPE=$cert_type, LETSENCRYPT_ENABLED=$letsencrypt_enabled"
+}
+
+# Renew Let's Encrypt certificate only
+renew_letsencrypt_certificate_only() {
+    log_info "Renewing Let's Encrypt certificate only..."
+    renew_letsencrypt_certificate
+}
+
+# Renew self-signed certificate only  
+renew_selfsigned_certificate_only() {
+    log_info "Renewing self-signed certificate only..."
+    cd "$N8N_DIR"
+    
+    # Generate new self-signed certificate
+    generate_ssl_certificate "$N8N_DIR/certs" certs/n8n-selfsigned.key.new certs/n8n-selfsigned.crt.new
+    
+    # Backup old self-signed certificates
+    [ -f certs/n8n-selfsigned.key ] && mv certs/n8n-selfsigned.key certs/n8n-selfsigned.key.old
+    [ -f certs/n8n-selfsigned.crt ] && mv certs/n8n-selfsigned.crt certs/n8n-selfsigned.crt.old
+    
+    # Move new self-signed certificates into place
+    mv certs/n8n-selfsigned.key.new certs/n8n-selfsigned.key
+    mv certs/n8n-selfsigned.crt.new certs/n8n-selfsigned.crt
+    
+    # Update main certificates if needed
+    local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    if [ "$letsencrypt_enabled" != "true" ]; then
+        # No Let's Encrypt - use self-signed for main certificates
+        cp certs/n8n-selfsigned.crt certs/n8n.crt
+        cp certs/n8n-selfsigned.key certs/n8n.key
+        log_info "Main certificates updated with new self-signed certificate"
+    fi
+    
+    # Regenerate nginx configuration
+    generate_nginx_config
+    
+    docker compose restart nginx
+    log_success "Self-signed certificate renewed for another 10 years"
+}
+
+# Renew both certificate types
+renew_both_certificates() {
+    log_info "Renewing both Let's Encrypt and self-signed certificates..."
+    renew_letsencrypt_certificate_only
+    renew_selfsigned_certificate_only
+    log_success "Both certificate types have been renewed"
+}
+
+# Enhanced certificate details display for dual certificate system
+show_certificate_details() {
+    printf "\n${BLUE}Certificate System Status${NC}\n"
+    printf "==========================\n\n"
+    
+    # Get environment information
+    local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    local cert_type=$(grep "^CERTIFICATE_TYPE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "self-signed")
+    
+    # Show system overview
+    printf "${BOLD}Certificate Configuration:${NC}\n"
+    if [ "$letsencrypt_enabled" = "true" ] && [ -n "$domain" ]; then
+        printf "• Primary External Access: ${GREEN}Let's Encrypt${NC} ($domain)\n"
+        printf "• Internal/IP Access: ${YELLOW}Self-signed${NC} (IPs, localhost, .local)\n"
+        printf "• Current Primary Type: ${CYAN}$cert_type${NC}\n"
+    else
+        printf "• All Access: ${YELLOW}Self-signed certificate${NC}\n"
+        printf "• Let's Encrypt: ${RED}Not configured${NC}\n"
+    fi
+    printf "\n"
+    
+    # Show Let's Encrypt certificate details if it exists
+    if [ -f "$N8N_DIR/certs/n8n-letsencrypt.crt" ]; then
+        printf "${BOLD}Let's Encrypt Certificate Details:${NC}\n"
+        printf "==========================================\n"
+        
+        local le_expiry=$(openssl x509 -in "$N8N_DIR/certs/n8n-letsencrypt.crt" -noout -enddate 2>/dev/null | cut -d= -f2)
+        local le_days=$(( ($(date -d "$le_expiry" +%s 2>/dev/null || echo "0") - $(date +%s)) / 86400 )) 2>/dev/null || le_days="unknown"
+        local le_subject=$(openssl x509 -in "$N8N_DIR/certs/n8n-letsencrypt.crt" -noout -subject 2>/dev/null | sed 's/subject=//')
+        local le_issuer=$(openssl x509 -in "$N8N_DIR/certs/n8n-letsencrypt.crt" -noout -issuer 2>/dev/null | sed 's/issuer=//' | sed 's/.*CN=\([^,]*\).*/\1/')
+        
+        printf "Subject: %s\n" "$le_subject"
+        printf "Issuer: %s\n" "$le_issuer"
+        printf "Expires: %s" "$le_expiry"
+        
+        if [ "$le_days" != "unknown" ]; then
+            if [ $le_days -lt 7 ]; then
+                printf " ${RED}(%d days - URGENT)${NC}\n" "$le_days"
+            elif [ $le_days -lt 30 ]; then
+                printf " ${YELLOW}(%d days - Soon)${NC}\n" "$le_days"  
+            else
+                printf " ${GREEN}(%d days)${NC}\n" "$le_days"
+            fi
+        else
+            printf "\n"
+        fi
+        
+        # Show domains covered
+        local le_sans=$(openssl x509 -in "$N8N_DIR/certs/n8n-letsencrypt.crt" -text -noout 2>/dev/null | grep -A1 "Subject Alternative Name" | tail -1 | sed 's/DNS://g' | tr ',' '\n' | sed 's/^ */• /' || echo "• $domain")
+        printf "Domains covered:\n%s\n\n" "$le_sans"
+    fi
+    
+    # Show Self-signed certificate details
+    if [ -f "$N8N_DIR/certs/n8n-selfsigned.crt" ]; then
+        printf "${BOLD}Self-Signed Certificate Details:${NC}\n"
+        printf "=================================\n"
+        
+        local ss_expiry=$(openssl x509 -in "$N8N_DIR/certs/n8n-selfsigned.crt" -noout -enddate 2>/dev/null | cut -d= -f2)
+        local ss_days=$(( ($(date -d "$ss_expiry" +%s 2>/dev/null || echo "0") - $(date +%s)) / 86400 )) 2>/dev/null || ss_days="unknown"
+        local ss_subject=$(openssl x509 -in "$N8N_DIR/certs/n8n-selfsigned.crt" -noout -subject 2>/dev/null | sed 's/subject=//')
+        
+        printf "Subject: %s\n" "$ss_subject"
+        printf "Expires: %s" "$ss_expiry"
+        
+        if [ "$ss_days" != "unknown" ]; then
+            if [ $ss_days -lt 30 ]; then
+                printf " ${YELLOW}(%d days)${NC}\n" "$ss_days"
+            else
+                printf " ${GREEN}(%d days)${NC}\n" "$ss_days"
+            fi
+        else
+            printf "\n"
+        fi
+        
+        # Show domains and IPs covered
+        local ss_sans=$(openssl x509 -in "$N8N_DIR/certs/n8n-selfsigned.crt" -text -noout 2>/dev/null | grep -A1 "Subject Alternative Name" | tail -1)
+        if [ -n "$ss_sans" ]; then
+            printf "Coverage:\n"
+            echo "$ss_sans" | grep -o 'DNS:[^,]*' | sed 's/DNS:/• Domain: /' 2>/dev/null || true
+            echo "$ss_sans" | grep -o 'IP:[^,]*' | sed 's/IP:/• IP: /' 2>/dev/null || true
+        fi
+        printf "\n"
+    fi
+    
+    # Show main certificate status
+    printf "${BOLD}Current Active Certificate (nginx):${NC}\n"
+    printf "====================================\n"
+    if [ -f "$N8N_DIR/certs/n8n.crt" ]; then
+        local main_expiry=$(openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -enddate 2>/dev/null | cut -d= -f2)
+        local main_issuer=$(openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -issuer 2>/dev/null | sed 's/issuer=//' | sed 's/.*CN=\([^,]*\).*/\1/')
+        
+        if [[ "$main_issuer" == *"Let's Encrypt"* ]]; then
+            printf "Type: ${GREEN}Let's Encrypt${NC} (external domain)\n"
+        else
+            printf "Type: ${YELLOW}Self-signed${NC} (all access)\n"
+        fi
+        printf "Expires: %s\n" "$main_expiry"
+    else
+        printf "${RED}No main certificate found!${NC}\n"
+    fi
+    
+    printf "\n${BOLD}Certificate Files:${NC}\n"
+    printf "==================\n"
+    [ -f "$N8N_DIR/certs/n8n.crt" ] && printf "✅ Main certificate: n8n.crt\n" || printf "❌ Main certificate: n8n.crt\n"
+    [ -f "$N8N_DIR/certs/n8n-letsencrypt.crt" ] && printf "✅ Let's Encrypt: n8n-letsencrypt.crt\n" || printf "⚪ Let's Encrypt: n8n-letsencrypt.crt (not configured)\n"
+    [ -f "$N8N_DIR/certs/n8n-selfsigned.crt" ] && printf "✅ Self-signed: n8n-selfsigned.crt\n" || printf "❌ Self-signed: n8n-selfsigned.crt\n"
+}
+
+# Generate nginx configuration with dual certificate support
+generate_nginx_config() {
+    local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    
+    log_info "Generating nginx configuration with dual certificate support..."
+    
+    cat > "$N8N_DIR/nginx.conf" << 'EOF'
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream n8n {
+        server n8n:5678;
+    }
+
+EOF
+
+    # Add external domain server block if Let's Encrypt is enabled
+    if [ "$letsencrypt_enabled" = "true" ] && [ -n "$domain" ]; then
+        cat >> "$N8N_DIR/nginx.conf" << EOF
+    # External domain access with Let's Encrypt certificate
+    server {
+        listen 443 ssl;
+        server_name $domain;
+
+        # Use Let's Encrypt certificate for external domain
+        ssl_certificate /etc/nginx/certs/n8n.crt;
+        ssl_certificate_key /etc/nginx/certs/n8n.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+
+        client_max_body_size 100M;
+
+        location / {
+            proxy_pass https://n8n;
+            proxy_ssl_verify off;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+        }
+    }
+
+EOF
+    fi
+
+    # Add catch-all server block for internal access with self-signed certificate
+    cat >> "$N8N_DIR/nginx.conf" << 'EOF'
+    # Internal access (IPs, localhost, .local) with self-signed certificate
+    server {
+        listen 443 ssl default_server;
+        server_name _;
+
+        # Use self-signed certificate for internal/IP access
+        ssl_certificate /etc/nginx/certs/n8n-selfsigned.crt;
+        ssl_certificate_key /etc/nginx/certs/n8n-selfsigned.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+
+        client_max_body_size 100M;
+
+        location / {
+            proxy_pass https://n8n;
+            proxy_ssl_verify off;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+        }
+    }
+}
+EOF
+
+    log_success "Nginx configuration generated with dual certificate support"
+    if [ "$letsencrypt_enabled" = "true" ] && [ -n "$domain" ]; then
+        log_info "- External domain ($domain): Let's Encrypt certificate"
+    fi
+    log_info "- Internal/IP access: Self-signed certificate"
 }
 
 # Built-in backup function with comprehensive logging
@@ -515,17 +808,17 @@ validate_backup() {
     
     if [ "$postgres_found" = "false" ]; then
         log_warn "Missing postgres data in backup"
-        validation_errors=$((validation_errors + 1))
+        validation_errors=$((validation_errors + 1)) || true
     fi
     
     if [ "$n8n_found" = "false" ]; then
         log_warn "Missing n8n data in backup"
-        validation_errors=$((validation_errors + 1))
+        validation_errors=$((validation_errors + 1)) || true
     fi
     
     if [ "$config_found" = "false" ]; then
         log_warn "Missing config data in backup"
-        validation_errors=$((validation_errors + 1))
+        validation_errors=$((validation_errors + 1)) || true
     fi
     
     # Security components are optional but logged for information
@@ -618,13 +911,15 @@ restore_backup() {
         filename=$(basename "$backup_file")
         timestamp=$(echo "$filename" | sed 's/full_backup_//;s/.tar.gz//')
         size=$(du -h "$backup_file" | cut -f1)
-        printf "%d) %s (Size: %s)\n" $((i+1)) "$timestamp" "$size"
-        log_debug "Backup option $((i+1)): $filename ($size)"
+        local option_num=$((i+1)) || true
+        printf "%d) %s (Size: %s)\n" "$option_num" "$timestamp" "$size"
+        log_debug "Backup option $option_num: $filename ($size)"
     done
-    printf "%d) Cancel\n" $((${#backup_files[@]}+1))
+    local cancel_option=$((${#backup_files[@]}+1)) || true
+    printf "%d) Cancel\n" "$cancel_option"
     printf "\n"
     
-    read -p "Select backup to restore (1-$((${#backup_files[@]}+1))): " RESTORE_CHOICE
+    read -p "Select backup to restore (1-$cancel_option): " RESTORE_CHOICE
     
     log_debug "User selected option: $RESTORE_CHOICE"
     
@@ -835,6 +1130,48 @@ restore_backup() {
     docker compose ps --format '{{.Names}} {{.Status}}' | while read line; do
         log_debug "  $line"
     done
+    
+    # Post-restore enterprise security validation
+    log_info "Validating enterprise security features after restore..."
+    sleep 30  # Allow containers to fully start
+    
+    # Check if containers are healthy
+    local containers_healthy=true
+    for container in $(docker compose ps --format '{{.Names}}'); do
+        local status=$(docker inspect "$container" --format='{{.State.Health.Status}}' 2>/dev/null || echo "running")
+        if [[ "$status" != "healthy" ]] && [[ "$status" != "running" ]]; then
+            log_warn "Container $container is not healthy: $status"
+            containers_healthy=false
+        fi
+    done
+    
+    # Validate certificate configuration
+    if [ -f "$n8n_dir/.env" ]; then
+        local cert_type=$(grep "^CERTIFICATE_TYPE=" "$n8n_dir/.env" 2>/dev/null | cut -d'=' -f2)
+        local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$n8n_dir/.env" 2>/dev/null | cut -d'=' -f2)
+        
+        if [ "$cert_type" = "letsencrypt" ] && [ -n "$domain" ]; then
+            log_info "Testing enterprise health check with Let's Encrypt validation..."
+            if curl -s "https://$domain/healthz" > /dev/null 2>&1; then
+                log_success "Enterprise security validation: PASSED"
+            else
+                log_warn "Enterprise security validation: Certificate validation may need time to stabilize"
+            fi
+        else
+            log_info "Testing enterprise health check with self-signed validation..."
+            if curl -s --cacert "$n8n_dir/certs/n8n.crt" https://localhost/healthz > /dev/null 2>&1; then
+                log_success "Enterprise security validation: PASSED"
+            else
+                log_warn "Enterprise security validation: Certificate validation may need time to stabilize"
+            fi
+        fi
+    fi
+    
+    if $containers_healthy; then
+        log_success "All enterprise security features restored successfully"
+    else
+        log_warn "Some containers may need additional time to become healthy"
+    fi
     
     rm -rf "$TEMP_DIR"
     log_debug "Cleaned up temp directory"
@@ -1179,10 +1516,24 @@ health_check() {
         printf "  PostgreSQL: ${RED}✗ not ready${NC}\n"
     fi
     
-    if curl -k -s https://localhost/healthz > /dev/null 2>&1; then
-        printf "  n8n API: ${GREEN}✓ accessible${NC}\n"
+    # Universal health check - adapts to certificate type and domain
+    local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    local cert_type=$(grep "^CERTIFICATE_TYPE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    
+    if [ "$cert_type" = "letsencrypt" ] && [ -n "$domain" ]; then
+        # Let's Encrypt: Use domain with system CA bundle for proper validation
+        if curl -s "https://$domain/healthz" > /dev/null 2>&1; then
+            printf "  n8n API: ${GREEN}✓ accessible${NC}\n"
+        else
+            printf "  n8n API: ${RED}✗ not accessible${NC}\n"
+        fi
     else
-        printf "  n8n API: ${RED}✗ not accessible${NC}\n"
+        # Self-signed or fallback: Use localhost with custom certificate
+        if curl -s --cacert "$N8N_DIR/certs/n8n.crt" https://localhost/healthz > /dev/null 2>&1; then
+            printf "  n8n API: ${GREEN}✓ accessible${NC}\n"
+        else
+            printf "  n8n API: ${RED}✗ not accessible${NC}\n"
+        fi
     fi
     
     printf "\nPress Enter to continue..."
@@ -1215,12 +1566,26 @@ renew_certificate() {
         renew_letsencrypt_certificate
     else
         # Generate new self-signed certificate with enhanced features (IP addresses + SAN)
-        generate_ssl_certificate "$N8N_DIR/certs" certs/n8n.key.new certs/n8n.crt.new
+        generate_ssl_certificate "$N8N_DIR/certs" certs/n8n-selfsigned.key.new certs/n8n-selfsigned.crt.new
         
-        mv certs/n8n.key certs/n8n.key.old
-        mv certs/n8n.crt certs/n8n.crt.old
-        mv certs/n8n.key.new certs/n8n.key
-        mv certs/n8n.crt.new certs/n8n.crt
+        # Backup old self-signed certificates
+        [ -f certs/n8n-selfsigned.key ] && mv certs/n8n-selfsigned.key certs/n8n-selfsigned.key.old
+        [ -f certs/n8n-selfsigned.crt ] && mv certs/n8n-selfsigned.crt certs/n8n-selfsigned.crt.old
+        
+        # Move new self-signed certificates into place
+        mv certs/n8n-selfsigned.key.new certs/n8n-selfsigned.key
+        mv certs/n8n-selfsigned.crt.new certs/n8n-selfsigned.crt
+        
+        # Update main certificates (use Let's Encrypt if available, otherwise self-signed)
+        if [ -f certs/n8n-letsencrypt.crt ]; then
+            cp certs/n8n-letsencrypt.crt certs/n8n.crt
+            cp certs/n8n-letsencrypt.key certs/n8n.key
+            log_info "Main certificates updated: Using Let's Encrypt for external access"
+        else
+            cp certs/n8n-selfsigned.crt certs/n8n.crt
+            cp certs/n8n-selfsigned.key certs/n8n.key
+            log_info "Main certificates updated: Using self-signed for all access"
+        fi
         
         docker compose restart nginx
         printf "${GREEN}Self-signed certificate renewed for another 10 years${NC}\n"
@@ -1408,7 +1773,7 @@ unban_ip() {
             local jail_count=1
             for jail in "${jails[@]}"; do
                 printf "%d) %s\n" "$jail_count" "$jail"
-                ((jail_count++))
+                ((jail_count++)) || true
             done
             printf "0) Cancel\n\n"
             printf "Select jail: "
@@ -1757,48 +2122,95 @@ setup_letsencrypt_cloudflare() {
     printf "\n${BLUE}Cloudflare DNS Setup${NC}\n"
     printf "=====================\n\n"
     
-    printf "${YELLOW}Creating a Cloudflare API Token:${NC}\n"
-    printf "1. Go to: https://dash.cloudflare.com/profile/api-tokens\n"
-    printf "2. Click 'Create Token'\n"
-    printf "3. Use template: 'Edit zone DNS'\n"
-    printf "4. Configure permissions:\n"
-    printf "   - Zone Resources: Include → Specific zone → Your domain\n"
-    printf "   - Zone:DNS:Edit permission\n"
-    printf "5. Click 'Continue to summary' → 'Create Token'\n"
-    printf "6. Copy the ENTIRE token (it's long!)\n\n"
-    
-    local max_attempts=3
-    local attempt=1
-    
-    while [ $attempt -le $max_attempts ]; do
-        printf "Enter your Cloudflare API token (attempt $attempt/$max_attempts): "
-        read -s cf_token
-        echo
+    # Check for existing Cloudflare credentials
+    local cf_token
+    if [ -f "$N8N_DIR/.cloudflare.ini" ]; then
+        cf_token=$(grep "dns_cloudflare_api_token" "$N8N_DIR/.cloudflare.ini" | cut -d'=' -f2 | xargs)
+        printf "${GREEN}Found existing Cloudflare credentials.${NC}\n"
+        printf "Using saved token: ${CYAN}${cf_token:0:8}...${cf_token: -4}${NC}\n\n"
         
+        # Get domain name
         printf "Enter your domain name (e.g., n8n.example.com): "
         read domain_name
+    else
+        printf "${YELLOW}Creating a Cloudflare API Token:${NC}\n"
+        printf "1. Go to: https://dash.cloudflare.com/profile/api-tokens\n"
+        printf "2. Click 'Create Token'\n"
+        printf "3. Use template: 'Edit zone DNS'\n"
+        printf "4. Configure permissions:\n"
+        printf "   - Zone Resources: Include → Specific zone → Your domain\n"
+        printf "   - Zone:DNS:Edit permission\n"
+        printf "5. Click 'Continue to summary' → 'Create Token'\n"
+        printf "6. Copy the ENTIRE token (it's long!)\n\n"
         
-        # Validate token before proceeding
-        if validate_cloudflare_token "$cf_token" "$domain_name"; then
-            break
-        else
-            if [ $attempt -lt $max_attempts ]; then
-                printf "\n${YELLOW}Token validation failed. Please check:${NC}\n"
-                printf "- You copied the ENTIRE token\n"
-                printf "- Token has 'Zone:DNS:Edit' permission\n"
-                printf "- Token is for the correct domain\n\n"
-                printf "Try again? (y/n): "
-                read retry
-                if [ "$retry" != "y" ]; then
+        local max_attempts=3
+        local attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+            printf "Enter your Cloudflare API token (attempt $attempt/$max_attempts): "
+            read -s cf_token
+            echo
+            
+            printf "Enter your domain name (e.g., n8n.example.com): "
+            read domain_name
+            
+            # Validate token before proceeding
+            if validate_cloudflare_token "$cf_token" "$domain_name"; then
+                break
+            else
+                if [ $attempt -lt $max_attempts ]; then
+                    printf "\n${YELLOW}Token validation failed. Please check:${NC}\n"
+                    printf "- You copied the ENTIRE token\n"
+                    printf "- Token has 'Zone:DNS:Edit' permission\n"
+                    printf "- Token is for the correct domain\n\n"
+                    printf "Try again? (y/n): "
+                    read retry
+                    if [ "$retry" != "y" ]; then
+                        return 1
+                    fi
+                else
+                    log_error "Maximum attempts reached. Please verify your token and try again."
                     return 1
                 fi
-            else
-                log_error "Maximum attempts reached. Please verify your token and try again."
-                return 1
             fi
+            ((attempt++)) || true
+        done
+    fi
+    
+    # Validate existing token (if found)
+    if [ -f "$N8N_DIR/.cloudflare.ini" ]; then
+        printf "Validating saved Cloudflare API token...\n"
+        if ! validate_cloudflare_token "$cf_token" "$domain_name"; then
+            printf "\n${YELLOW}Token validation failed. This could be due to:${NC}\n"
+            printf "• Network connectivity issues\n"
+            printf "• API timeout problems\n"
+            printf "• Token permissions or expiry\n\n"
+            
+            printf "Options:\n"
+            printf "1) Continue with existing token (skip validation)\n"
+            printf "2) Enter a new token\n"
+            printf "3) Exit and try again later\n"
+            printf "Choose option (1-3): "
+            read choice
+            
+            case $choice in
+                1)
+                    printf "${YELLOW}Continuing with existing token...${NC}\n"
+                    ;;
+                2)
+                    printf "Enter your new Cloudflare API token: "
+                    read -s cf_token
+                    printf "\n"
+                    ;;
+                3)
+                    return 1
+                    ;;
+                *)
+                    printf "${YELLOW}Invalid choice. Continuing with existing token...${NC}\n"
+                    ;;
+            esac
         fi
-        ((attempt++))
-    done
+    fi
     
     # Save credentials securely
     cat > "$N8N_DIR/.cloudflare.ini" << EOF
@@ -1809,17 +2221,18 @@ EOF
     # Update .env with certificate settings
     update_letsencrypt_env "letsencrypt" "$domain_name" "cloudflare"
     
-    # Request certificate
-    log_info "Requesting Let's Encrypt certificate via Cloudflare..."
-    sudo certbot certonly \
-        --dns-cloudflare \
-        --dns-cloudflare-credentials "$N8N_DIR/.cloudflare.ini" \
-        -d "$domain_name" \
-        --non-interactive \
-        --agree-tos \
-        --email "admin@$domain_name" \
-        --cert-path "$N8N_DIR/certs" \
-        --key-path "$N8N_DIR/certs"
+    # Request Let's Encrypt certificate for external domain only
+    log_info "Requesting Let's Encrypt certificate for external domain via Cloudflare..."
+    log_info "Note: Let's Encrypt certificates are for external domain only. Self-signed certificates handle internal access."
+    
+    # Build certbot command for external domain only (Let's Encrypt doesn't support IPs, localhost, or .local domains)
+    local certbot_cmd="sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials $N8N_DIR/.cloudflare.ini -d $domain_name"
+    
+    # Complete command with standard options - save as letsencrypt-specific files
+    certbot_cmd="$certbot_cmd --non-interactive --agree-tos --email admin@$domain_name"
+    
+    log_debug "Executing: $certbot_cmd"
+    eval $certbot_cmd
     
     if [ $? -eq 0 ]; then
         copy_letsencrypt_certificates "$domain_name"
@@ -1900,14 +2313,18 @@ EOF
     # Update .env with certificate settings
     update_letsencrypt_env "letsencrypt" "$domain_name" "route53"
     
-    # Request certificate
-    log_info "Requesting Let's Encrypt certificate via Route53..."
-    sudo certbot certonly \
-        --dns-route53 \
-        -d "$domain_name" \
-        --non-interactive \
-        --agree-tos \
-        --email "admin@$domain_name"
+    # Request Let's Encrypt certificate for external domain only
+    log_info "Requesting Let's Encrypt certificate for external domain via Route53..."
+    log_info "Note: Let's Encrypt certificates are for external domain only. Self-signed certificates handle internal access."
+    
+    # Build certbot command for external domain only (Let's Encrypt doesn't support IPs, localhost, or .local domains)
+    local certbot_cmd="sudo certbot certonly --dns-route53 -d $domain_name"
+    
+    # Complete command with standard options
+    certbot_cmd="$certbot_cmd --non-interactive --agree-tos --email admin@$domain_name"
+    
+    log_debug "Executing: $certbot_cmd"
+    eval $certbot_cmd
     
     if [ $? -eq 0 ]; then
         copy_letsencrypt_certificates "$domain_name"
@@ -1947,15 +2364,18 @@ EOF
     # Update .env with certificate settings
     update_letsencrypt_env "letsencrypt" "$domain_name" "digitalocean"
     
-    # Request certificate
-    log_info "Requesting Let's Encrypt certificate via DigitalOcean..."
-    sudo certbot certonly \
-        --dns-digitalocean \
-        --dns-digitalocean-credentials "$N8N_DIR/.digitalocean.ini" \
-        -d "$domain_name" \
-        --non-interactive \
-        --agree-tos \
-        --email "admin@$domain_name"
+    # Request Let's Encrypt certificate for external domain only
+    log_info "Requesting Let's Encrypt certificate for external domain via DigitalOcean..."
+    log_info "Note: Let's Encrypt certificates are for external domain only. Self-signed certificates handle internal access."
+    
+    # Build certbot command for external domain only (Let's Encrypt doesn't support IPs, localhost, or .local domains)
+    local certbot_cmd="sudo certbot certonly --dns-digitalocean --dns-digitalocean-credentials $N8N_DIR/.digitalocean.ini -d $domain_name"
+    
+    # Complete command with standard options
+    certbot_cmd="$certbot_cmd --non-interactive --agree-tos --email admin@$domain_name"
+    
+    log_debug "Executing: $certbot_cmd"
+    eval $certbot_cmd
     
     if [ $? -eq 0 ]; then
         copy_letsencrypt_certificates "$domain_name"
@@ -2009,15 +2429,18 @@ EOF
     update_letsencrypt_env "letsencrypt" "$domain_name" "google"
     echo "GOOGLE_CLOUD_PROJECT=$project_id" >> "$N8N_DIR/.env"
     
-    # Request certificate
-    log_info "Requesting Let's Encrypt certificate via Google Cloud DNS..."
-    sudo certbot certonly \
-        --dns-google \
-        --dns-google-credentials "$N8N_DIR/.google.ini" \
-        -d "$domain_name" \
-        --non-interactive \
-        --agree-tos \
-        --email "admin@$domain_name"
+    # Request Let's Encrypt certificate for external domain only
+    log_info "Requesting Let's Encrypt certificate for external domain via Google Cloud DNS..."
+    log_info "Note: Let's Encrypt certificates are for external domain only. Self-signed certificates handle internal access."
+    
+    # Build certbot command for external domain only (Let's Encrypt doesn't support IPs, localhost, or .local domains)
+    local certbot_cmd="sudo certbot certonly --dns-google --dns-google-credentials $N8N_DIR/.google.ini -d $domain_name"
+    
+    # Complete command with standard options
+    certbot_cmd="$certbot_cmd --non-interactive --agree-tos --email admin@$domain_name"
+    
+    log_debug "Executing: $certbot_cmd"
+    eval $certbot_cmd
     
     if [ $? -eq 0 ]; then
         copy_letsencrypt_certificates "$domain_name"
@@ -2091,15 +2514,18 @@ EOF
     
     chmod +x "$N8N_DIR/manual-dns-auth.sh"
     
-    # Request certificate with manual DNS challenge
-    sudo certbot certonly \
-        --manual \
-        --preferred-challenges dns \
-        --manual-auth-hook "$N8N_DIR/manual-dns-auth.sh" \
-        -d "$domain_name" \
-        --non-interactive \
-        --agree-tos \
-        --email "$email_address"
+    # Request Let's Encrypt certificate for external domain only via manual DNS challenge
+    log_info "Requesting Let's Encrypt certificate for external domain via manual DNS challenge..."
+    log_info "Note: Let's Encrypt certificates are for external domain only. Self-signed certificates handle internal access."
+    
+    # Build certbot command for external domain only (Let's Encrypt doesn't support IPs, localhost, or .local domains)
+    local certbot_cmd="sudo certbot certonly --manual --preferred-challenges dns --manual-auth-hook $N8N_DIR/manual-dns-auth.sh -d $domain_name"
+    
+    # Complete command with standard options
+    certbot_cmd="$certbot_cmd --non-interactive --agree-tos --email $email_address"
+    
+    log_debug "Executing: $certbot_cmd"
+    eval $certbot_cmd
     
     if [ $? -eq 0 ]; then
         copy_letsencrypt_certificates "$domain_name"
@@ -2144,15 +2570,38 @@ update_letsencrypt_env() {
     fi
 }
 
-# Helper function to copy Let's Encrypt certificates
+# Helper function to copy Let's Encrypt certificates - Dual Certificate System
 copy_letsencrypt_certificates() {
     local domain="$1"
     
-    sudo cp "/etc/letsencrypt/live/$domain/fullchain.pem" "$N8N_DIR/certs/n8n.crt"
-    sudo cp "/etc/letsencrypt/live/$domain/privkey.pem" "$N8N_DIR/certs/n8n.key"
-    sudo chown $USER:$USER "$N8N_DIR/certs/"*
-    chmod 644 "$N8N_DIR/certs/n8n.crt"
-    chmod 600 "$N8N_DIR/certs/n8n.key"
+    # Copy Let's Encrypt certificates to dedicated files
+    sudo cp "/etc/letsencrypt/live/$domain/fullchain.pem" "$N8N_DIR/certs/n8n-letsencrypt.crt"
+    sudo cp "/etc/letsencrypt/live/$domain/privkey.pem" "$N8N_DIR/certs/n8n-letsencrypt.key"
+    
+    # Set proper ownership and permissions for Let's Encrypt certificates
+    sudo chown $USER:$USER "$N8N_DIR/certs/n8n-letsencrypt."*
+    chmod 644 "$N8N_DIR/certs/n8n-letsencrypt.crt"
+    chmod 600 "$N8N_DIR/certs/n8n-letsencrypt.key"
+    
+    # If no self-signed certificates exist, generate them for internal access
+    if [ ! -f "$N8N_DIR/certs/n8n-selfsigned.crt" ]; then
+        log_info "Generating self-signed certificates for internal access..."
+        generate_self_signed_certificate
+    fi
+    
+    # Copy Let's Encrypt certificate to main n8n.crt for external access (nginx default)
+    cp "$N8N_DIR/certs/n8n-letsencrypt.crt" "$N8N_DIR/certs/n8n.crt"
+    cp "$N8N_DIR/certs/n8n-letsencrypt.key" "$N8N_DIR/certs/n8n.key"
+    
+    # Update environment to track dual certificate status
+    update_env_with_certificate_status "letsencrypt" "true"
+    
+    # Regenerate nginx configuration for dual certificate system
+    generate_nginx_config
+    
+    log_info "Dual certificate system active:"
+    log_info "- External domain ($domain): Let's Encrypt certificate"
+    log_info "- Internal/IP access: Self-signed certificate"
 }
 
 # Update Let's Encrypt domain
@@ -2273,15 +2722,18 @@ renew_letsencrypt_certificate() {
             printf "\n${YELLOW}Manual DNS renewal required!${NC}\n"
             printf "You need to update the DNS TXT record for renewal.\n\n"
             
-            # Run manual renewal
-            sudo certbot certonly \
-                --manual \
-                --preferred-challenges dns \
-                --manual-auth-hook "$N8N_DIR/manual-dns-auth.sh" \
-                -d "$domain" \
-                --force-renewal \
-                --non-interactive \
-                --agree-tos
+            # Build manual renewal command for external domain only
+            log_info "Renewing Let's Encrypt certificate for external domain: $domain"
+            log_info "Note: Let's Encrypt certificates are for external domain only. Self-signed certificates handle internal access."
+            
+            # Build manual renewal command for external domain only (Let's Encrypt doesn't support IPs, localhost, or .local domains)
+            local certbot_cmd="sudo certbot certonly --manual --preferred-challenges dns --manual-auth-hook $N8N_DIR/manual-dns-auth.sh -d $domain"
+            
+            # Complete command with renewal options
+            certbot_cmd="$certbot_cmd --force-renewal --non-interactive --agree-tos"
+            
+            log_debug "Executing manual renewal: $certbot_cmd"
+            eval $certbot_cmd
             ;;
         *)
             log_error "Unknown DNS provider: $provider"
@@ -2496,53 +2948,97 @@ security_settings_menu() {
         
         printf "${BOLD}SSL Certificate Management:${NC}\n"
         printf "1) View Certificate Details\n"
-        printf "2) Renew Current Certificate\n"
-        printf "3) Switch to Let's Encrypt (DNS-01)\n"
-        printf "4) Switch to Self-Signed\n"
+        
+        # Show appropriate renewal options based on certificate status
+        local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+        if [ "$letsencrypt_enabled" = "true" ]; then
+            printf "2) Renew Let's Encrypt Certificate\n"
+            printf "3) Renew Self-Signed Certificate\n"
+            printf "4) Renew Both Certificates\n"
+        else
+            printf "2) Renew Self-Signed Certificate\n"
+        fi
+        
+        printf "5) Switch to Let's Encrypt (DNS-01)\n"
+        printf "6) Switch to Self-Signed\n"
         if [ "$cert_type" = "letsencrypt" ]; then
-            printf "5) Update Let's Encrypt Domain\n"
+            printf "7) Update Let's Encrypt Domain\n"
         fi
         printf "\n${BOLD}Security Configuration:${NC}\n"
-        printf "6) Configure Firewall\n"
-        printf "7) View Firewall Status\n"
-        printf "8) Configure fail2ban\n"
-        printf "9) View fail2ban Status\n"
-        printf "10) Configure Automated Updates\n"
+        printf "8) Configure Firewall\n"
+        printf "9) View Firewall Status\n"
+        printf "10) Configure fail2ban\n"
+        printf "11) View fail2ban Status\n"
+        printf "12) Configure Automated Updates\n"
         printf "\n${BOLD}Production Security:${NC}\n"
-        printf "11) Configure Cloudflare Protection\n"
-        printf "12) Cloudflare IP Whitelist Management\n"
-        printf "13) Run Security Audit\n"
-        printf "14) Configure Security Monitoring\n"
+        printf "13) Configure Cloudflare Protection\n"
+        printf "14) Cloudflare IP Whitelist Management\n"
+        printf "15) Run Security Audit\n"
+        printf "16) Configure Security Monitoring\n"
         printf "\n${BOLD}Quick Actions:${NC}\n"
-        printf "15) Apply All Security Hardening\n"
+        printf "17) Apply All Security Hardening\n"
         printf "\n0) Back to Management Menu\n\n"
         printf "Select option: "
         read sec_choice
         
         case $sec_choice in
             1)
-                printf "\n${BLUE}Certificate Details:${NC}\n"
-                printf "====================\n"
-                openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -text | head -20
+                show_certificate_details
                 printf "\nPress Enter to continue..."
                 read
                 ;;
             2)
-                renew_certificate
+                local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+                if [ "$letsencrypt_enabled" = "true" ]; then
+                    renew_letsencrypt_certificate_only
+                else
+                    renew_selfsigned_certificate_only
+                fi
                 ;;
             3)
-                setup_letsencrypt
+                local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+                if [ "$letsencrypt_enabled" = "true" ]; then
+                    renew_selfsigned_certificate_only
+                else
+                    setup_letsencrypt
+                fi
                 ;;
             4)
-                printf "\nSwitching to self-signed certificate...\n"
-                sed -i "s/^CERTIFICATE_TYPE=.*/CERTIFICATE_TYPE=self-signed/" "$N8N_DIR/.env"
-                cd "$N8N_DIR"
-                generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
-                docker compose restart nginx
-                log_success "Switched to self-signed certificate"
-                sleep 2
+                local letsencrypt_enabled=$(grep "^LETSENCRYPT_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+                if [ "$letsencrypt_enabled" = "true" ]; then
+                    renew_both_certificates
+                else
+                    printf "\nSwitching to self-signed certificate...\n"
+                fi
                 ;;
             5)
+                setup_letsencrypt
+                ;;
+            6)
+                printf "\nSwitching to self-signed certificate...\n"
+                cd "$N8N_DIR"
+                
+                # Generate self-signed certificate if it doesn't exist
+                if [ ! -f "certs/n8n-selfsigned.crt" ]; then
+                    generate_self_signed_certificate
+                fi
+                
+                # Update main certificates to use self-signed
+                cp certs/n8n-selfsigned.crt certs/n8n.crt
+                cp certs/n8n-selfsigned.key certs/n8n.key
+                
+                # Update environment 
+                update_env_with_certificate_status "self-signed" "false"
+                
+                # Regenerate nginx configuration
+                generate_nginx_config
+                
+                docker compose restart nginx
+                log_success "Switched to self-signed certificate for external access"
+                log_info "Let's Encrypt certificates preserved for future use"
+                sleep 2
+                ;;
+            7)
                 if [ "$cert_type" = "letsencrypt" ]; then
                     update_letsencrypt_domain
                 else
@@ -2550,7 +3046,7 @@ security_settings_menu() {
                     sleep 1
                 fi
                 ;;
-            6)
+            8)
                 configure_firewall
                 printf "\nPress Enter to continue..."
                 read
@@ -2630,7 +3126,7 @@ validate_cloudflare_token() {
     
     # Test basic API connectivity first
     printf " connectivity"
-    local connectivity_test=$(curl -s --max-time 10 --connect-timeout 5 \
+    local connectivity_test=$(curl -s --max-time 8 --connect-timeout 3 \
         -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
         -H "Accept: application/json" 2>&1)
     
@@ -2662,7 +3158,7 @@ validate_cloudflare_token() {
     
     # Test token validity
     printf " • token"
-    local test_response=$(curl -s --max-time 15 --connect-timeout 5 \
+    local test_response=$(curl -s --max-time 10 --connect-timeout 3 \
         -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
@@ -2696,7 +3192,7 @@ validate_cloudflare_token() {
     
     # Test zone read permissions
     printf " • permissions"
-    local zones_response=$(curl -s --max-time 15 --connect-timeout 5 \
+    local zones_response=$(curl -s --max-time 10 --connect-timeout 3 \
         -X GET "https://api.cloudflare.com/client/v4/zones?per_page=1" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json")
@@ -2911,6 +3407,7 @@ configure_cloudflare_protection() {
     if [ -f "$N8N_DIR/.cloudflare.ini" ]; then
         cf_token=$(grep "dns_cloudflare_api_token" "$N8N_DIR/.cloudflare.ini" | cut -d'=' -f2 | xargs)
         printf "${GREEN}Found existing Cloudflare credentials.${NC}\n"
+        printf "Using saved token: ${CYAN}${cf_token:0:8}...${cf_token: -4}${NC}\n"
     else
         printf "Cloudflare API token required for protection setup.\n\n"
         printf "${YELLOW}Creating a Cloudflare API Token:${NC}\n"
@@ -2938,10 +3435,41 @@ EOF
     # Validate API token first
     printf "Validating Cloudflare API token...\n"
     if ! validate_cloudflare_token "$cf_token"; then
-        printf "\n${YELLOW}Please check your API token and try again.${NC}\n"
-        printf "Press Enter to continue..."
-        read
-        return 1
+        printf "\n${YELLOW}Token validation failed. This could be due to:${NC}\n"
+        printf "• Network connectivity issues\n"
+        printf "• API timeout problems\n"
+        printf "• Token permissions or expiry\n\n"
+        
+        printf "Options:\n"
+        printf "1) Continue with existing token (skip validation)\n"
+        printf "2) Enter a new token\n"
+        printf "3) Exit and try again later\n"
+        printf "Choose option (1-3): "
+        read choice
+        
+        case $choice in
+            1)
+                printf "${YELLOW}Continuing with existing token...${NC}\n"
+                ;;
+            2)
+                printf "Enter your new Cloudflare API token: "
+                read -s cf_token
+                printf "\n"
+                
+                # Save new token
+                cat > "$N8N_DIR/.cloudflare.ini" << EOF
+dns_cloudflare_api_token = $cf_token
+EOF
+                chmod 600 "$N8N_DIR/.cloudflare.ini"
+                printf "${GREEN}New token saved.${NC}\n"
+                ;;
+            3)
+                return 1
+                ;;
+            *)
+                printf "${YELLOW}Invalid choice. Continuing with existing token...${NC}\n"
+                ;;
+        esac
     fi
     
     # Extract root domain for zone lookup
@@ -3154,7 +3682,7 @@ EOF
     local ssl_response=$(curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$zone_id/settings/ssl" \
         -H "Authorization: Bearer $cf_token" \
         -H "Content-Type: application/json" \
-        --data '{"value": "full"}')
+        --data '{"value": "strict"}')
     
     # Save configuration
     echo "CLOUDFLARE_ZONE_ID=$zone_id" >> "$N8N_DIR/.env"
@@ -3165,7 +3693,7 @@ EOF
     printf "✓ DNS proxy (orange cloud) for DDoS protection\n"
     printf "✓ Rate limiting on login endpoints (5 requests/minute)\n"
     printf "✓ Bot protection with JavaScript challenges\n"
-    printf "✓ SSL/TLS encryption (Full mode)\n\n"
+    printf "✓ SSL/TLS encryption (Full Strict mode)\n\n"
     
     printf "Additional recommendations:\n"
     printf "• Enable 'Under Attack Mode' during active threats\n"
@@ -3209,10 +3737,26 @@ whitelist_cloudflare_ips() {
     fi
     printf " ${GREEN}✓${NC} UFW is responding\n\n"
     
-    # Check current status
-    if sudo ufw status | grep -q "443.*ALLOW.*Anywhere" && ! sudo ufw status | grep -q "Cloudflare"; then
+    # Check current Cloudflare whitelist status (same logic as status display)
+    local current_ipv4_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l 2>/dev/null)
+    current_ipv4_rules=${current_ipv4_rules:-0}  # Fallback to 0 if empty
+    local current_ipv6_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l 2>/dev/null)
+    current_ipv6_rules=${current_ipv6_rules:-0}  # Fallback to 0 if empty
+    local current_cf_rule_count=$((current_ipv4_rules + current_ipv6_rules)) || true
+    
+    # Validate rule count is numeric
+    if ! [[ "$current_cf_rule_count" =~ ^[0-9]+$ ]]; then
+        current_cf_rule_count=0
+    fi
+    
+    # Display appropriate status message
+    if [ "$current_cf_rule_count" -eq 0 ]; then
         printf "${YELLOW}Warning: Port 443 is currently open to all IPs${NC}\n"
         printf "This will be restricted to Cloudflare IPs only.\n\n"
+    else
+        printf "${GREEN}Current status: Cloudflare whitelist is active${NC}\n"
+        printf "Active rules: %d (IPv4: %d, IPv6: %d)\n" "$current_cf_rule_count" "$current_ipv4_rules" "$current_ipv6_rules"
+        printf "This will update to the latest Cloudflare IP ranges.\n\n"
     fi
     
     # Detect SSH connection source if possible
@@ -3282,6 +3826,9 @@ whitelist_cloudflare_ips() {
     local max_attempts=50  # Prevent infinite loops
     local attempt=0
     local rules_found=true
+    local rules_deleted_successfully=0
+    local consecutive_failures=0
+    local parse_failures=0
     
     while [ "$rules_found" = true ] && [ $attempt -lt $max_attempts ]; do
         # Get UFW status with timeout (protect from set -e)
@@ -3293,7 +3840,7 @@ whitelist_cloudflare_ips() {
         }
         
         # Check if any 443 rules exist (protect from set -e)
-        if echo "$ufw_output" | grep -q "443/tcp" 2>/dev/null; then
+        if echo "$ufw_output" | grep -E "\s443\s.*ALLOW" 2>/dev/null | grep -q .; then
             log_debug "Found 443 rules, continuing deletion"
         else
             log_debug "No more 443 rules found, stopping deletion loop"
@@ -3302,8 +3849,9 @@ whitelist_cloudflare_ips() {
         fi
         
         # Get the first 443 rule number (protect from set -e)
-        local rule_line=$(echo "$ufw_output" | grep "443/tcp" | head -1 || true)
-        local rule_num=$(echo "$rule_line" | awk '{print $2}' | tr -d ']' | grep '^[0-9][0-9]*$' || true)
+        local rule_line=$(echo "$ufw_output" | grep -E "\s443\s.*ALLOW" | head -1 || true)
+        # Extract rule number from brackets: [ 7] -> 7
+        local rule_num=$(echo "$rule_line" | sed -n 's/^\[\s*\([0-9]\+\)\].*/\1/p' || true)
         
         log_debug "UFW rule line: '$rule_line'"
         log_debug "Extracted rule number: '$rule_num'"
@@ -3314,13 +3862,29 @@ whitelist_cloudflare_ips() {
             if sudo ufw --force delete "$rule_num" >/dev/null 2>&1; then
                 printf " ${GREEN}✓${NC}\n"
                 log_debug "Successfully deleted UFW rule #$rule_num"
+                ((rules_deleted_successfully++)) || true
+                consecutive_failures=0  # Reset counter on success
             else
                 printf " ${YELLOW}failed${NC}\n"
                 log_debug "Failed to delete UFW rule #$rule_num"
+                ((consecutive_failures++)) || true
+                # Stop if too many consecutive failures to prevent infinite loops
+                if [ $consecutive_failures -ge 5 ]; then
+                    log_error "Too many consecutive deletion failures. Stopping to prevent infinite loop."
+                    printf " ${YELLOW}⚠${NC} Stopping deletion due to repeated failures\n"
+                    break
+                fi
             fi
         else
             log_debug "Could not parse rule number from: '$rule_line'"
             log_debug "Raw rule_num value: '$rule_num'"
+            ((parse_failures++)) || true
+            # Stop if we can't parse rule numbers consistently
+            if [ $parse_failures -ge 3 ]; then
+                log_error "Too many rule parsing failures. UFW output format may have changed."
+                printf " ${YELLOW}⚠${NC} Stopping deletion due to parsing issues\n"
+                break
+            fi
             
             # If we can't parse rule numbers but rules exist, something is wrong
             if [ -n "$rule_line" ]; then
@@ -3502,12 +4066,12 @@ whitelist_cloudflare_ips() {
     fi
     
     # Calculate totals for summary
-    local total_rules_added=$((internal_rules_added + added_count))
-    local total_rules_expected=$((${#internal_networks[@]} + ipv4_count))
+    local total_rules_added=$((internal_rules_added + added_count)) || true
+    local total_rules_expected=$((${#internal_networks[@]} + ipv4_count)) || true
     
     if [ "$ipv6_count" -gt 0 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]; then
-        total_rules_added=$((total_rules_added + ipv6_added_count))
-        total_rules_expected=$((total_rules_expected + ipv6_count))
+        total_rules_added=$((total_rules_added + ipv6_added_count)) || true
+        total_rules_expected=$((total_rules_expected + ipv6_count)) || true
     fi
     
     # Save whitelist status
@@ -3563,8 +4127,19 @@ remove_cloudflare_whitelist() {
     printf "\n${BLUE}Remove Cloudflare IP Whitelist${NC}\n"
     printf "===============================\n\n"
     
-    # Check if whitelist is active
-    if ! sudo ufw status | grep -q "Cloudflare"; then
+    # Check if whitelist is active (same logic as status display)
+    local ipv4_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l 2>/dev/null)
+    ipv4_rules=${ipv4_rules:-0}  # Fallback to 0 if empty
+    local ipv6_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l 2>/dev/null)
+    ipv6_rules=${ipv6_rules:-0}  # Fallback to 0 if empty
+    local cf_rule_count=$((ipv4_rules + ipv6_rules)) || true
+    
+    # Validate rule count is numeric
+    if ! [[ "$cf_rule_count" =~ ^[0-9]+$ ]]; then
+        cf_rule_count=0
+    fi
+    
+    if [ "$cf_rule_count" -eq 0 ]; then
         printf "${YELLOW}No Cloudflare IP whitelist rules found.${NC}\n"
         printf "\nPress Enter to continue..."
         read
@@ -3589,19 +4164,34 @@ remove_cloudflare_whitelist() {
     log_info "Backing up current firewall rules..."
     sudo ufw status numbered > "$N8N_DIR/ufw_backup_before_removal_$(date +%Y%m%d_%H%M%S).txt"
     
-    # Remove Cloudflare-specific rules and internal network rules
+    # Remove Cloudflare-specific rules (IPv4 and IPv6) and internal network rules
     printf "\nRemoving Cloudflare IP rules and internal network rules...\n"
     local removed_count=0
+    local max_attempts=50  # Safety limit
+    local attempt=0
     
-    while sudo ufw status numbered | grep -qE "(Cloudflare|Internal)"; do
-        local rule_num=$(sudo ufw status numbered | grep -E "(Cloudflare|Internal)" | head -1 | sed 's/\[\([0-9]*\)\].*/\1/')
-        if [ -n "$rule_num" ]; then
-            sudo ufw --force delete "$rule_num" 2>/dev/null
-            ((removed_count++))
-            printf "."
-        else
+    # Remove all 443 rules (Cloudflare IPs, internal networks, etc.)
+    while [ $attempt -lt $max_attempts ]; do
+        local ufw_output=$(sudo ufw status numbered 2>/dev/null || true)
+        local rule_line=$(echo "$ufw_output" | grep -E "\\s443\\s.*ALLOW" | head -1 || true)
+        
+        if [ -z "$rule_line" ]; then
+            log_debug "No more 443 rules found"
             break
         fi
+        
+        # Extract rule number from brackets: [ 7] -> 7  
+        local rule_num=$(echo "$rule_line" | sed -n 's/^\[\s*\([0-9]\+\)\].*/\1/p' || true)
+        if [ -n "$rule_num" ] && [ "$rule_num" -gt 0 ] 2>/dev/null; then
+            sudo ufw --force delete "$rule_num" >/dev/null 2>&1 && {
+                ((removed_count++)) || true
+                printf "."
+            }
+        else
+            log_debug "Could not parse rule number from: '$rule_line'"
+            break
+        fi
+        ((attempt++)) || true
     done
     
     printf " ${GREEN}✓${NC} (Removed %d rules)\n" "$removed_count"
@@ -3614,9 +4204,11 @@ remove_cloudflare_whitelist() {
     printf "Reloading firewall...\n"
     sudo ufw reload
     
-    # Update status in .env
+    # Update status in .env file
     sed -i '/^CLOUDFLARE_IP_WHITELIST=/d' "$N8N_DIR/.env" 2>/dev/null || true
     sed -i '/^CLOUDFLARE_IP_WHITELIST_DATE=/d' "$N8N_DIR/.env" 2>/dev/null || true
+    echo "CLOUDFLARE_IP_WHITELIST=disabled" >> "$N8N_DIR/.env"
+    log_info "Cloudflare IP whitelist status updated to disabled in .env file"
     
     printf "\n${GREEN}Cloudflare IP whitelist removed successfully!${NC}\n\n"
     printf "Port 443 is now open to all IPs (standard configuration).\n"
@@ -3635,8 +4227,19 @@ update_cloudflare_ips() {
     printf "\n${BLUE}Update Cloudflare IP List${NC}\n"
     printf "=========================\n\n"
     
-    # Check if whitelist is active
-    if ! sudo ufw status | grep -q "Cloudflare"; then
+    # Check if whitelist is active (same logic as status display)
+    local ipv4_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l 2>/dev/null)
+    ipv4_rules=${ipv4_rules:-0}  # Fallback to 0 if empty
+    local ipv6_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l 2>/dev/null)
+    ipv6_rules=${ipv6_rules:-0}  # Fallback to 0 if empty
+    local cf_rule_count=$((ipv4_rules + ipv6_rules)) || true
+    
+    # Validate rule count is numeric
+    if ! [[ "$cf_rule_count" =~ ^[0-9]+$ ]]; then
+        cf_rule_count=0
+    fi
+    
+    if [ "$cf_rule_count" -eq 0 ]; then
         printf "${YELLOW}Cloudflare IP whitelist is not currently active.${NC}\n"
         printf "Enable it first from the menu.\n"
         printf "\nPress Enter to continue..."
@@ -3666,26 +4269,47 @@ show_cloudflare_whitelist_status() {
     printf "\n${BLUE}Cloudflare IP Whitelist Status${NC}\n"
     printf "===============================\n\n"
     
-    # Check if whitelist is enabled
-    local whitelist_status=$(grep "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    # Count Cloudflare rules in UFW first (reality check)
+    local ipv4_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l 2>/dev/null)
+    ipv4_rules=${ipv4_rules:-0}  # Fallback to 0 if empty
+    local ipv6_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l 2>/dev/null)
+    ipv6_rules=${ipv6_rules:-0}  # Fallback to 0 if empty
+    local cf_rule_count=$((ipv4_rules + ipv6_rules)) || true
+    
+    # Validate rule count is numeric
+    if ! [[ "$cf_rule_count" =~ ^[0-9]+$ ]]; then
+        cf_rule_count=0
+    fi
+    
+    # Check .env file status for comparison
+    local env_status=$(grep "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
     local whitelist_date=$(grep "^CLOUDFLARE_IP_WHITELIST_DATE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
     
-    if [ "$whitelist_status" = "enabled" ]; then
-        printf "Status: ${GREEN}ENABLED${NC}\n"
+    # Determine actual status based on UFW rules (reality)
+    if [ "$cf_rule_count" -gt 0 ]; then
+        printf "Status: ${GREEN}ENABLED${NC} (active rules detected)\n"
         if [ -n "$whitelist_date" ]; then
             printf "Last updated: %s\n" "$whitelist_date"
         fi
+        # Check for inconsistency with .env file
+        if [ "$env_status" != "enabled" ]; then
+            printf "${YELLOW}Note: .env file status inconsistent - rules are active${NC}\n"
+        fi
     else
-        printf "Status: ${YELLOW}DISABLED${NC}\n"
+        printf "Status: ${YELLOW}DISABLED${NC} (no active rules)\n"
+        # Check for inconsistency with .env file  
+        if [ "$env_status" = "enabled" ]; then
+            printf "${YELLOW}Note: .env file says enabled but no rules found${NC}\n"
+        fi
     fi
     
-    # Count Cloudflare rules in UFW
-    local cf_rule_count=$(sudo ufw status numbered | grep -c "Cloudflare" || echo "0")
-    printf "Active Cloudflare rules: ${CYAN}%d${NC}\n" "$cf_rule_count"
+    printf "Active Cloudflare rules: ${CYAN}%d${NC} (IPv4: %d, IPv6: %d)\n" "$cf_rule_count" "$ipv4_rules" "$ipv6_rules"
     
     # Check port 443 accessibility
     printf "\nPort 443 Configuration:\n"
-    if sudo ufw status | grep -q "443.*ALLOW.*Anywhere" && ! sudo ufw status | grep -q "Cloudflare.*443"; then
+    local general_443_rule=$(sudo ufw status | grep -E "443.*ALLOW.*Anywhere" | wc -l)
+    
+    if [ "$general_443_rule" -gt 0 ] && [ "$cf_rule_count" -eq 0 ]; then
         printf "• ${YELLOW}Open to all IPs${NC} (standard configuration)\n"
     elif [ "$cf_rule_count" -gt 0 ]; then
         printf "• ${GREEN}Restricted to Cloudflare IPs only${NC}\n"
@@ -3720,10 +4344,30 @@ cloudflare_ip_whitelist_menu() {
         printf "${BLUE}Cloudflare IP Whitelist Management${NC}\n"
         printf "===================================\n\n"
         
-        # Show current status
-        local whitelist_status=$(grep "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
-        if [ "$whitelist_status" = "enabled" ]; then
-            printf "Current Status: ${GREEN}Whitelist Enabled${NC}\n\n"
+        # Show current status based on actual UFW rules (reality check)
+        local ipv4_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l 2>/dev/null)
+        ipv4_rules=${ipv4_rules:-0}  # Fallback to 0 if empty
+        
+        local ipv6_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l 2>/dev/null)
+        ipv6_rules=${ipv6_rules:-0}  # Fallback to 0 if empty
+        
+        # Validate numeric content before arithmetic
+        if ! [[ "$ipv4_rules" =~ ^[0-9]+$ ]]; then 
+            ipv4_rules=0
+        fi
+        if ! [[ "$ipv6_rules" =~ ^[0-9]+$ ]]; then 
+            ipv6_rules=0
+        fi
+        
+        local cf_rule_count=$((ipv4_rules + ipv6_rules)) || true
+        
+        # Final validation of rule count
+        if ! [[ "$cf_rule_count" =~ ^[0-9]+$ ]]; then
+            cf_rule_count=0
+        fi
+        
+        if [ "$cf_rule_count" -gt 0 ]; then
+            printf "Current Status: ${GREEN}Whitelist Enabled${NC} (%d active rules)\n\n" "$cf_rule_count"
         else
             printf "Current Status: ${YELLOW}Whitelist Disabled${NC}\n\n"
         fi
@@ -4624,8 +5268,11 @@ deploy_n8n() {
     
     # Handle certificates after restoration
     if [ ! -f "$N8N_DIR/certs/n8n.crt" ]; then
-        # No certificates in backup - generate fresh ones
-        generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
+        # No certificates in backup - generate fresh self-signed certificates
+        generate_self_signed_certificate
+        cp "$N8N_DIR/certs/n8n-selfsigned.crt" "$N8N_DIR/certs/n8n.crt"
+        cp "$N8N_DIR/certs/n8n-selfsigned.key" "$N8N_DIR/certs/n8n.key"
+        update_env_with_certificate_status "self-signed" "false"
     elif [ -n "${RESTORE_BACKUP:-}" ]; then
         # Certificates were restored from backup - check if they need updating
         log_info "Checking restored certificates for hostname/IP compatibility..."
@@ -4659,8 +5306,10 @@ deploy_n8n() {
                 cp "$N8N_DIR/certs/n8n.crt" "$N8N_DIR/certs/n8n.crt.backup.$(date +%Y%m%d_%H%M%S)"
                 cp "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.key.backup.$(date +%Y%m%d_%H%M%S)"
                 
-                # Generate new certificate with current IPs
-                generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
+                # Generate new self-signed certificate with current IPs
+                generate_self_signed_certificate
+                cp "$N8N_DIR/certs/n8n-selfsigned.crt" "$N8N_DIR/certs/n8n.crt"
+                cp "$N8N_DIR/certs/n8n-selfsigned.key" "$N8N_DIR/certs/n8n.key"
                 log_success "Certificate regenerated with current IP addresses: ${current_ips[*]}"
             else
                 log_success "Restored certificate is compatible with current hostname/IP"
@@ -4702,6 +5351,8 @@ N8N_ENCRYPTION_KEY=$N8N_ENCRYPTION_KEY
 N8N_HOST=0.0.0.0
 N8N_PORT=5678
 N8N_PROTOCOL=https
+N8N_SSL_KEY=/certs/n8n.key
+N8N_SSL_CERT=/certs/n8n.crt
 WEBHOOK_URL=https://localhost/
 GENERIC_TIMEZONE=$TIMEZONE
 N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
@@ -4747,6 +5398,8 @@ services:
       - N8N_HOST=${N8N_HOST}
       - N8N_PORT=${N8N_PORT}
       - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - N8N_SSL_KEY=${N8N_SSL_KEY}
+      - N8N_SSL_CERT=${N8N_SSL_CERT}
       - WEBHOOK_URL=${WEBHOOK_URL}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=${N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS}
@@ -4759,11 +5412,12 @@ services:
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - ./.n8n:/home/node/.n8n
+      - ./certs:/certs:ro
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      test: ["CMD", "sh", "-c", "openssl s_client -connect localhost:5678 -CAfile /etc/ssl/certs/ca-certificates.crt -verify_return_error </dev/null >/dev/null 2>&1 || openssl s_client -connect localhost:5678 -CAfile /certs/n8n.crt -verify_return_error </dev/null >/dev/null 2>&1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -4857,7 +5511,8 @@ http {
             limit_req zone=auth burst=2 nodelay;
             limit_req_status 429;
             
-            proxy_pass http://n8n;
+            proxy_pass https://n8n;
+            proxy_ssl_verify off;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -4874,7 +5529,8 @@ http {
             limit_req zone=api burst=20 nodelay;
             limit_req_status 429;
             
-            proxy_pass http://n8n;
+            proxy_pass https://n8n;
+            proxy_ssl_verify off;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -4891,7 +5547,8 @@ http {
             limit_req zone=api burst=50 nodelay;
             limit_req_status 429;
             
-            proxy_pass http://n8n;
+            proxy_pass https://n8n;
+            proxy_ssl_verify off;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -4906,7 +5563,8 @@ http {
             limit_req zone=general burst=20 nodelay;
             limit_req_status 429;
             
-            proxy_pass http://n8n;
+            proxy_pass https://n8n;
+            proxy_ssl_verify off;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

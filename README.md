@@ -2,6 +2,26 @@
 
 A comprehensive master script for deploying, managing, and maintaining n8n with PostgreSQL, Nginx, and automated features. This all-in-one solution handles installation, updates, backups, uninstallation, and complete environment management with no external port exposure required.
 
+## 📋 Changelog
+
+### v2.3.1 (August 2025)
+- **Dual Certificate System**: Innovative architecture with Let's Encrypt and self-signed certificates coexisting
+- **Individual Certificate Renewal**: Renew Let's Encrypt, self-signed, or both certificates independently
+- **Enhanced Certificate Details**: Comprehensive view showing both certificate types with expiration dates
+- **Complete Coverage**: Self-signed certificates now include external domain for universal access
+- **Smart Nginx Configuration**: Dynamic server blocks based on available certificate types
+- **Certificate File Structure**: Dedicated files (`n8n-letsencrypt.crt`, `n8n-selfsigned.crt`) with active certificate linking
+
+### v2.3.0 (January 2025)
+- **End-to-End HTTPS**: Implemented full HTTPS encryption between nginx and n8n containers
+- **Enterprise Security**: Added N8N_SSL_KEY and N8N_SSL_CERT environment variables for internal TLS
+- **Enterprise Certificate Validation**: Health checks now validate SSL certificates without bypassing security
+- **Universal Health Check**: Adapts to Let's Encrypt or self-signed certificates automatically
+- **Enterprise Backup Validation**: Post-restore security verification with certificate validation
+- **Cloudflare Fix**: Resolved compatibility issues with "Always Use HTTPS" and "Automatic HTTPS Rewrites"
+- **Zero-Trust Architecture**: All internal communication now encrypted with SSL/TLS
+- **Improved Status Detection**: Fixed misleading Cloudflare whitelist warning messages
+
 ## 🚀 Features
 
 ### Core Features
@@ -49,6 +69,23 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
   - 10GB available storage
   - Network connectivity
 - Regular user account with sudo privileges (don't run as root)
+
+## 🏗️ Architecture
+
+The deployment creates a secure, production-ready n8n instance with the following architecture:
+
+```
+Internet → Cloudflare (optional) → Port 443 → nginx (HTTPS) → n8n (HTTPS)
+                                                ↓                    ↓
+                                           SSL Termination    Internal HTTPS
+                                           & Proxy Layer      with SSL Certs
+```
+
+**Key Components:**
+- **nginx**: Reverse proxy handling SSL termination and request routing
+- **n8n**: Workflow automation engine with HTTPS enabled internally
+- **PostgreSQL**: Production database for workflow storage
+- **End-to-End Encryption**: HTTPS communication between all components
 
 ## 🎯 Quick Start
 
@@ -167,6 +204,7 @@ The following variables cannot be removed (protection built-in):
 - `POSTGRES_*` (Database configuration)
 - `N8N_BASIC_AUTH_*` (Authentication)
 - `N8N_HOST`, `N8N_PORT`, `N8N_PROTOCOL` (Core settings)
+- `N8N_SSL_KEY`, `N8N_SSL_CERT` (End-to-end HTTPS encryption)
 - `WEBHOOK_URL`, `GENERIC_TIMEZONE`
 - `N8N_ENCRYPTION_KEY` (Security)
 - `DB_*` (Database connection)
@@ -224,7 +262,10 @@ n8n uses email/password authentication. You'll create your credentials during th
 | Project Directory | `~/n8n/` |
 | n8n Data | `~/n8n/.n8n/` |
 | Backups | `~/n8n/backups/` |
-| Certificates | `~/n8n/certs/` |
+| **Certificates (Dual System)** | `~/n8n/certs/` |
+| Active Certificate | `~/n8n/certs/n8n.crt` & `n8n.key` |
+| Let's Encrypt Certificate | `~/n8n/certs/n8n-letsencrypt.crt` & `n8n-letsencrypt.key` |
+| Self-Signed Certificate | `~/n8n/certs/n8n-selfsigned.crt` & `n8n-selfsigned.key` |
 | Environment Config | `~/n8n/.env` |
 | Docker Compose | `~/n8n/docker-compose.yml` |
 | Nginx Config | `~/n8n/nginx.conf` |
@@ -248,6 +289,21 @@ Through management menu:
 ```
 Creates a timestamped backup: `full_backup_YYYYMMDD_HHMMSS.tar.gz`
 
+### What's Included in Backups
+**Enterprise Security Components:**
+- SSL certificates and private keys
+- Enterprise environment variables (N8N_SSL_KEY, N8N_SSL_CERT)
+- Updated docker-compose.yml with certificate mounts
+- Updated nginx.conf with HTTPS proxy configuration
+- Cloudflare configuration and IP whitelists
+- DNS provider credentials (Let's Encrypt)
+
+**Data & Configuration:**
+- Complete n8n workflows and data
+- PostgreSQL database (full volume backup)
+- All environment variables and settings
+- Security configurations (fail2ban, UFW rules)
+
 ### Restore Process
 Through management menu:
 ```bash
@@ -256,6 +312,8 @@ Through management menu:
 - Lists available backups with sizes
 - Select the backup file to restore
 - Confirm restoration (current data will be lost)
+- **Enterprise Security Validation**: Automatically validates SSL certificates and health endpoints after restore
+- **Universal Compatibility**: Adapts validation to Let's Encrypt or self-signed certificates
 
 ### Unified Backup System
 The script now uses a unified backup format for:
@@ -371,6 +429,8 @@ This removes:
 - ✅ **Full system configuration**: All security components installed and configured  
 - ✅ **Data restoration**: Database, workflows, configurations, certificates
 - ✅ **Security restoration**: DNS credentials, firewall rules, fail2ban config
+- ✅ **Enterprise SSL validation**: Certificate validation and health endpoint testing
+- ✅ **Security feature verification**: Ensures all enterprise security components work correctly
 - ✅ **Automatic adaptation**: Certificates and configs adapted to new environment
 
 ### Alternative: Menu-Based Restore (Post-Installation)
@@ -416,14 +476,16 @@ The backup system now supports **complete cross-system migration** with automati
 - ⚠️ **Validated**: Checked with fallback if incompatible
 
 **Certificate Behavior Details:**
-- **Self-Signed**: Always regenerated with new system's IP addresses and hostname
+- **Self-Signed**: Always regenerated with new system's IP addresses, hostname, and external domain
 - **Let's Encrypt**: Domain-based certificates work unchanged on any system
+- **Dual System**: Both certificate types restored and available simultaneously
+- **Automatic Adaptation**: Nginx config generated based on available certificate types
 - **Backup Protection**: Original certificates backed up before regeneration
 
 ## 🔧 Advanced Features
 
 ### Health Check
-Comprehensive health monitoring:
+Enterprise-grade health monitoring with certificate validation:
 ```bash
 ./n8n-master.sh → 1) Manage n8n → 8) Health Check
 ```
@@ -431,6 +493,8 @@ Comprehensive health monitoring:
 Shows:
 - Container health status (healthy/running/not running)
 - Service endpoint availability (Nginx, PostgreSQL, n8n API)
+- **Certificate Validation**: All SSL connections properly validated (no security bypasses)
+- **Universal Compatibility**: Automatically adapts to Let's Encrypt or self-signed certificates
 - Disk usage with percentage
 - Memory usage with percentage
 - Backup count and total size
@@ -757,6 +821,15 @@ Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Closed ports, ✅ Auto-updates
 
 ## 🆕 Recent Improvements
 
+### Version 2.3.1 - Dual Certificate System
+- **Dual Certificate Architecture**: Revolutionary system supporting both Let's Encrypt and self-signed certificates simultaneously
+- **Individual Certificate Management**: Independent renewal options for each certificate type
+- **Universal Access Coverage**: Self-signed certificates enhanced with external domain inclusion
+- **Smart Certificate Routing**: Nginx dynamically serves appropriate certificates based on access method
+- **Enhanced Certificate Details Display**: Comprehensive view of both certificate systems with expiration tracking
+- **Environment Variable Tracking**: New variables (LETSENCRYPT_ENABLED, CERTIFICATE_TYPE) for system state management
+- **Backup System Enhancement**: Complete dual certificate backup and restoration support
+
 ### Version 2.2.0 - Enhanced DNS & Dynamic IP Support
 - **Smart DNS Management**: Intelligent CNAME vs A record detection and recommendations
 - **Dynamic IP Support**: Native support for Synology DDoS, Duck DNS, No-IP services  
@@ -795,6 +868,28 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 This deployment script is provided as-is for use with n8n. n8n itself is licensed under the [Sustainable Use License](https://github.com/n8n-io/n8n/blob/master/LICENSE.md).
 
 ## 🔒 Security Configuration
+
+### Dual Certificate System Overview
+
+The deployment implements an innovative dual certificate architecture that provides both maximum security and universal accessibility:
+
+**🏢 External Domain Access (Let's Encrypt)**
+- Trusted by all browsers (no security warnings)
+- Automatic renewal every 90 days
+- DNS-01 challenge works behind closed ports/firewalls
+- Perfect for production internet-facing deployments
+
+**🏠 Internal Network Access (Self-Signed)**  
+- Covers all IP addresses, localhost, .local domains
+- Includes external domain for complete coverage
+- 10-year validity with automatic renewal
+- No external dependencies or internet requirements
+
+**🔄 Intelligent Certificate Routing**
+- Nginx automatically serves appropriate certificate based on access method
+- External domain requests → Let's Encrypt certificate
+- IP/localhost requests → Self-signed certificate
+- Seamless switching between certificate types
 
 ### SSL Certificate Management
 
@@ -969,8 +1064,9 @@ Automatically configure Cloudflare for enterprise-grade protection:
 - Creates DNS A record with proxy enabled (orange cloud)
 - Configures rate limiting on authentication endpoints (5 requests/minute)
 - Enables bot protection with JavaScript challenges
-- Sets SSL/TLS mode to "Full" for end-to-end encryption
+- Sets SSL/TLS mode to "Full (Strict)" for validated end-to-end encryption
 - Provides DDoS protection and global CDN
+- **Compatible with "Always Use HTTPS" and "Automatic HTTPS Rewrites"** (fixed with end-to-end HTTPS)
 
 **Requirements:**
 - Domain configured in Cloudflare (nameservers pointing to Cloudflare)
@@ -1158,11 +1254,15 @@ Configure automated security monitoring and alerting:
 This script now includes **enterprise-grade security features** suitable for production internet-facing deployments. The comprehensive security implementation includes:
 
 **✅ Core Security (Built-in):**
+- End-to-end HTTPS encryption (nginx → n8n with SSL/TLS)
+- Certificate validation in all health checks (enterprise compliance)
+- Universal SSL validation (Let's Encrypt + self-signed support)
 - Proper SSL certificates (Let's Encrypt with DNS-01)
 - Configured firewall rules (UFW)
 - Rate limiting implementation
 - fail2ban intrusion prevention
 - Automatic security updates
+- Zero-trust architecture with internal encryption
 
 **✅ Production Features (Available):**
 - Cloudflare CDN/proxy integration
@@ -1172,7 +1272,7 @@ This script now includes **enterprise-grade security features** suitable for pro
 
 ---
 
-**Version**: 2.2.0  
-**Last Updated**: December 2024  
+**Version**: 2.3.0  
+**Last Updated**: January 2025  
 **Tested On**: Ubuntu 22.04/24.04 LTS, Debian 11/12  
-**Security Level**: Production-Ready with Enhanced DNS & Dynamic IP Support
+**Security Level**: Enterprise-Grade with End-to-End HTTPS Encryption

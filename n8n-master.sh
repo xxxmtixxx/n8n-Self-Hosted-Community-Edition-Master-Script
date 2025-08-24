@@ -250,6 +250,140 @@ create_backup() {
             docker-compose.yml nginx.conf .env certs/ 2>/dev/null || true
     }
     
+    # Backup DNS provider credentials
+    log_info "Backing up DNS provider credentials..."
+    mkdir -p "$TEMP_DIR/dns_credentials"
+    
+    # Cloudflare credentials
+    if [ -f "$N8N_DIR/.cloudflare.ini" ]; then
+        cp "$N8N_DIR/.cloudflare.ini" "$TEMP_DIR/dns_credentials/"
+        log_debug "Backed up Cloudflare credentials"
+    fi
+    
+    # DigitalOcean credentials  
+    if [ -f "$N8N_DIR/.digitalocean.ini" ]; then
+        cp "$N8N_DIR/.digitalocean.ini" "$TEMP_DIR/dns_credentials/"
+        log_debug "Backed up DigitalOcean credentials"
+    fi
+    
+    # Google Cloud credentials
+    if [ -f "$N8N_DIR/.google.ini" ]; then
+        cp "$N8N_DIR/.google.ini" "$TEMP_DIR/dns_credentials/"
+        log_debug "Backed up Google Cloud credentials"
+    fi
+    
+    if [ -f "$N8N_DIR/.google-cloud.json" ]; then
+        cp "$N8N_DIR/.google-cloud.json" "$TEMP_DIR/dns_credentials/"
+        log_debug "Backed up Google Cloud JSON key"
+    fi
+    
+    # AWS credentials
+    if [ -f "$HOME/.aws/credentials" ]; then
+        mkdir -p "$TEMP_DIR/dns_credentials/.aws"
+        cp "$HOME/.aws/credentials" "$TEMP_DIR/dns_credentials/.aws/"
+        log_debug "Backed up AWS credentials"
+    fi
+    
+    # Create DNS credentials archive
+    if [ "$(ls -A $TEMP_DIR/dns_credentials 2>/dev/null)" ]; then
+        tar -czf "$TEMP_DIR/dns_credentials_${timestamp}.tar.gz" -C "$TEMP_DIR" dns_credentials
+        rm -rf "$TEMP_DIR/dns_credentials"
+        log_success "DNS credentials backed up"
+    else
+        log_debug "No DNS credentials found to backup"
+        # Create empty archive to maintain structure
+        tar -czf "$TEMP_DIR/dns_credentials_${timestamp}.tar.gz" -T /dev/null
+    fi
+    
+    # Backup fail2ban configuration
+    log_info "Backing up fail2ban configuration..."
+    mkdir -p "$TEMP_DIR/fail2ban_config"
+    
+    # Backup fail2ban jail and filter files
+    if [ -f "/etc/fail2ban/jail.d/n8n.conf" ]; then
+        sudo cp "/etc/fail2ban/jail.d/n8n.conf" "$TEMP_DIR/fail2ban_config/" 2>/dev/null || log_warn "Could not backup n8n jail config"
+        log_debug "Backed up n8n jail configuration"
+    fi
+    
+    if [ -f "/etc/fail2ban/filter.d/n8n-auth.conf" ]; then
+        sudo cp "/etc/fail2ban/filter.d/n8n-auth.conf" "$TEMP_DIR/fail2ban_config/" 2>/dev/null || log_warn "Could not backup n8n filter config"
+        log_debug "Backed up n8n filter configuration"
+    fi
+    
+    if [ -f "/etc/fail2ban/jail.local" ]; then
+        sudo cp "/etc/fail2ban/jail.local" "$TEMP_DIR/fail2ban_config/" 2>/dev/null || log_warn "Could not backup jail.local config"
+        log_debug "Backed up fail2ban IP whitelist"
+    fi
+    
+    # Create fail2ban config archive
+    if [ "$(ls -A $TEMP_DIR/fail2ban_config 2>/dev/null)" ]; then
+        tar -czf "$TEMP_DIR/fail2ban_config_${timestamp}.tar.gz" -C "$TEMP_DIR" fail2ban_config
+        rm -rf "$TEMP_DIR/fail2ban_config"
+        log_success "fail2ban configuration backed up"
+    else
+        log_debug "No fail2ban configuration found to backup"
+        # Create empty archive to maintain structure
+        tar -czf "$TEMP_DIR/fail2ban_config_${timestamp}.tar.gz" -T /dev/null
+    fi
+    
+    # Backup UFW firewall rules
+    log_info "Backing up firewall rules..."
+    mkdir -p "$TEMP_DIR/firewall_config"
+    
+    if command -v ufw &> /dev/null; then
+        # Export UFW rules
+        sudo ufw status numbered > "$TEMP_DIR/firewall_config/ufw_status.txt" 2>/dev/null || log_warn "Could not export UFW status"
+        sudo ufw --dry-run enable > "$TEMP_DIR/firewall_config/ufw_rules.txt" 2>/dev/null || log_warn "Could not export UFW rules"
+        
+        # Backup UFW config files if they exist
+        if [ -d "/etc/ufw" ]; then
+            sudo tar -czf "$TEMP_DIR/firewall_config/ufw_config.tar.gz" -C /etc ufw 2>/dev/null || log_warn "Could not backup UFW config files"
+            log_debug "Backed up UFW configuration files"
+        fi
+        
+        log_debug "Backed up firewall rules"
+    else
+        log_debug "UFW not installed, no firewall rules to backup"
+    fi
+    
+    # Create firewall config archive
+    if [ "$(ls -A $TEMP_DIR/firewall_config 2>/dev/null)" ]; then
+        tar -czf "$TEMP_DIR/firewall_config_${timestamp}.tar.gz" -C "$TEMP_DIR" firewall_config
+        rm -rf "$TEMP_DIR/firewall_config"
+        log_success "Firewall configuration backed up"
+    else
+        log_debug "No firewall configuration found to backup"
+        # Create empty archive to maintain structure
+        tar -czf "$TEMP_DIR/firewall_config_${timestamp}.tar.gz" -T /dev/null
+    fi
+    
+    # Backup Let's Encrypt data and configurations
+    log_info "Backing up Let's Encrypt data..."
+    mkdir -p "$TEMP_DIR/letsencrypt_config"
+    
+    # Backup Let's Encrypt account data and configurations
+    if [ -d "/etc/letsencrypt" ]; then
+        sudo tar -czf "$TEMP_DIR/letsencrypt_config/letsencrypt_etc.tar.gz" -C /etc letsencrypt 2>/dev/null || log_warn "Could not backup Let's Encrypt directory"
+        log_debug "Backed up Let's Encrypt account data and certificates"
+    fi
+    
+    # Backup manual DNS auth script if it exists
+    if [ -f "$N8N_DIR/manual-dns-auth.sh" ]; then
+        cp "$N8N_DIR/manual-dns-auth.sh" "$TEMP_DIR/letsencrypt_config/"
+        log_debug "Backed up manual DNS auth script"
+    fi
+    
+    # Create Let's Encrypt config archive
+    if [ "$(ls -A $TEMP_DIR/letsencrypt_config 2>/dev/null)" ]; then
+        tar -czf "$TEMP_DIR/letsencrypt_config_${timestamp}.tar.gz" -C "$TEMP_DIR" letsencrypt_config
+        rm -rf "$TEMP_DIR/letsencrypt_config"
+        log_success "Let's Encrypt configuration backed up"
+    else
+        log_debug "No Let's Encrypt configuration found to backup"
+        # Create empty archive to maintain structure
+        tar -czf "$TEMP_DIR/letsencrypt_config_${timestamp}.tar.gz" -T /dev/null
+    fi
+    
     # Log backup contents before creating combined archive
     log_debug "Backup components created:"
     ls -la "$TEMP_DIR"/ | while read line; do
@@ -356,12 +490,20 @@ validate_backup() {
     local postgres_found=false
     local n8n_found=false
     local config_found=false
+    local dns_creds_found=false
+    local fail2ban_found=false
+    local firewall_found=false
+    local letsencrypt_found=false
     
     while read -r line; do
         case "$line" in
             *postgres_data_*.tar.gz) postgres_found=true; log_debug "Found postgres data: $line" ;;
             *n8n_data_*.tar.gz) n8n_found=true; log_debug "Found n8n data: $line" ;;
             *config_*.tar.gz) config_found=true; log_debug "Found config data: $line" ;;
+            *dns_credentials_*.tar.gz) dns_creds_found=true; log_debug "Found DNS credentials: $line" ;;
+            *fail2ban_config_*.tar.gz) fail2ban_found=true; log_debug "Found fail2ban config: $line" ;;
+            *firewall_config_*.tar.gz) firewall_found=true; log_debug "Found firewall config: $line" ;;
+            *letsencrypt_config_*.tar.gz) letsencrypt_found=true; log_debug "Found Let's Encrypt config: $line" ;;
         esac
     done < "$temp_list"
     
@@ -385,8 +527,25 @@ validate_backup() {
         validation_errors=$((validation_errors + 1))
     fi
     
+    # Security components are optional but logged for information
+    if [ "$dns_creds_found" = "true" ]; then
+        log_debug "DNS credentials component found"
+    fi
+    
+    if [ "$fail2ban_found" = "true" ]; then
+        log_debug "fail2ban configuration component found"
+    fi
+    
+    if [ "$firewall_found" = "true" ]; then
+        log_debug "Firewall configuration component found"
+    fi
+    
+    if [ "$letsencrypt_found" = "true" ]; then
+        log_debug "Let's Encrypt configuration component found"
+    fi
+    
     if [ "$validation_errors" -gt 0 ]; then
-        log_error "Backup validation failed: $validation_errors missing components"
+        log_error "Backup validation failed: $validation_errors missing core components"
         return 1
     fi
     
@@ -395,7 +554,7 @@ validate_backup() {
     cd "$temp_dir"
     
     if tar -xzf "$backup_file" 2>/dev/null; then
-        # Test each sub-archive
+        # Test each sub-archive (core components)
         for component in postgres_data_*.tar.gz n8n_data_*.tar.gz config_*.tar.gz; do
             if [ -f "$component" ]; then
                 if tar -tzf "$component" >/dev/null 2>&1; then
@@ -404,6 +563,17 @@ validate_backup() {
                     log_error "Component $component is corrupted"
                     rm -rf "$temp_dir"
                     return 1
+                fi
+            fi
+        done
+        
+        # Test security components (optional, but validate if present)
+        for component in dns_credentials_*.tar.gz fail2ban_config_*.tar.gz firewall_config_*.tar.gz letsencrypt_config_*.tar.gz; do
+            if [ -f "$component" ]; then
+                if tar -tzf "$component" >/dev/null 2>&1; then
+                    log_debug "Security component $component is valid"
+                else
+                    log_warn "Security component $component is corrupted, but backup can still be restored"
                 fi
             fi
         done
@@ -645,6 +815,9 @@ restore_backup() {
         done
     fi
     
+    # Restore security components using helper function
+    restore_security_components "$TEMP_DIR" "$N8N_DIR"
+    
     # Start all services
     log_info "Starting all services..."
     docker compose up -d
@@ -662,6 +835,194 @@ restore_backup() {
     printf "${GREEN}Restore complete!${NC}\n"
     log_function_end "restore_backup"
     sleep 2
+    return 0
+}
+
+# Helper function to restore security components from backup
+restore_security_components() {
+    log_function_start "restore_security_components"
+    local temp_dir="$1"
+    local n8n_dir="$2"
+    
+    log_info "Restoring security components..."
+    
+    # Restore DNS provider credentials
+    log_info "Restoring DNS provider credentials..."
+    local dns_creds_file=$(ls "$temp_dir"/dns_credentials_*.tar.gz 2>/dev/null | head -1)
+    if [ -n "$dns_creds_file" ]; then
+        log_debug "Found DNS credentials file: $(basename "$dns_creds_file")"
+        cd "$temp_dir"
+        tar -xzf "$(basename "$dns_creds_file")" 2>/dev/null
+        
+        # Restore DNS provider credential files
+        if [ -d "dns_credentials" ]; then
+            # Cloudflare
+            if [ -f "dns_credentials/.cloudflare.ini" ]; then
+                cp "dns_credentials/.cloudflare.ini" "$n8n_dir/.cloudflare.ini"
+                chmod 600 "$n8n_dir/.cloudflare.ini"
+                log_debug "Restored Cloudflare credentials"
+            fi
+            
+            # DigitalOcean
+            if [ -f "dns_credentials/.digitalocean.ini" ]; then
+                cp "dns_credentials/.digitalocean.ini" "$n8n_dir/.digitalocean.ini"
+                chmod 600 "$n8n_dir/.digitalocean.ini"
+                log_debug "Restored DigitalOcean credentials"
+            fi
+            
+            # Google Cloud
+            if [ -f "dns_credentials/.google.ini" ]; then
+                cp "dns_credentials/.google.ini" "$n8n_dir/.google.ini"
+                chmod 600 "$n8n_dir/.google.ini"
+                log_debug "Restored Google Cloud credentials"
+            fi
+            
+            if [ -f "dns_credentials/.google-cloud.json" ]; then
+                cp "dns_credentials/.google-cloud.json" "$n8n_dir/.google-cloud.json"
+                chmod 600 "$n8n_dir/.google-cloud.json"
+                log_debug "Restored Google Cloud JSON key"
+            fi
+            
+            # AWS credentials
+            if [ -d "dns_credentials/.aws" ]; then
+                mkdir -p "$HOME/.aws"
+                cp "dns_credentials/.aws/credentials" "$HOME/.aws/credentials"
+                chmod 600 "$HOME/.aws/credentials"
+                log_debug "Restored AWS credentials"
+            fi
+            
+            log_success "DNS provider credentials restored"
+        fi
+    else
+        log_debug "No DNS credentials found in backup"
+    fi
+    
+    # Restore fail2ban configuration
+    log_info "Restoring fail2ban configuration..."
+    local fail2ban_file=$(ls "$temp_dir"/fail2ban_config_*.tar.gz 2>/dev/null | head -1)
+    if [ -n "$fail2ban_file" ]; then
+        log_debug "Found fail2ban config file: $(basename "$fail2ban_file")"
+        cd "$temp_dir"
+        tar -xzf "$(basename "$fail2ban_file")" 2>/dev/null
+        
+        if [ -d "fail2ban_config" ]; then
+            # Restore fail2ban jail configuration
+            if [ -f "fail2ban_config/n8n.conf" ]; then
+                sudo cp "fail2ban_config/n8n.conf" "/etc/fail2ban/jail.d/n8n.conf" 2>/dev/null || log_warn "Could not restore n8n jail config"
+                log_debug "Restored n8n jail configuration"
+            fi
+            
+            # Restore fail2ban filter configuration
+            if [ -f "fail2ban_config/n8n-auth.conf" ]; then
+                sudo cp "fail2ban_config/n8n-auth.conf" "/etc/fail2ban/filter.d/n8n-auth.conf" 2>/dev/null || log_warn "Could not restore n8n filter config"
+                log_debug "Restored n8n filter configuration"
+            fi
+            
+            # Restore fail2ban IP whitelist
+            if [ -f "fail2ban_config/jail.local" ]; then
+                sudo cp "fail2ban_config/jail.local" "/etc/fail2ban/jail.local" 2>/dev/null || log_warn "Could not restore jail.local config"
+                log_debug "Restored fail2ban IP whitelist"
+            fi
+            
+            # Restart fail2ban if configurations were restored
+            if command -v fail2ban-client &> /dev/null; then
+                sudo systemctl restart fail2ban 2>/dev/null || log_warn "Could not restart fail2ban"
+                log_success "fail2ban configuration restored and restarted"
+            fi
+        fi
+    else
+        log_debug "No fail2ban configuration found in backup"
+    fi
+    
+    # Restore firewall configuration
+    log_info "Restoring firewall configuration..."
+    local firewall_file=$(ls "$temp_dir"/firewall_config_*.tar.gz 2>/dev/null | head -1)
+    if [ -n "$firewall_file" ]; then
+        log_debug "Found firewall config file: $(basename "$firewall_file")"
+        cd "$temp_dir"
+        tar -xzf "$(basename "$firewall_file")" 2>/dev/null
+        
+        if [ -d "firewall_config" ] && command -v ufw &> /dev/null; then
+            # Restore UFW configuration files with enhanced error handling
+            if [ -f "firewall_config/ufw_config.tar.gz" ]; then
+                log_debug "Attempting to restore UFW configuration files..."
+                if sudo tar -xzf "firewall_config/ufw_config.tar.gz" -C /etc 2>/dev/null; then
+                    log_debug "UFW configuration files restored successfully"
+                    
+                    # Validate restored configuration
+                    if [ -f "/etc/ufw/ufw.conf" ]; then
+                        log_debug "UFW configuration validated"
+                    else
+                        log_warn "UFW configuration may be incomplete - /etc/ufw/ufw.conf not found"
+                    fi
+                else
+                    log_warn "Could not restore UFW config files - may be incompatible with current system"
+                fi
+            fi
+            
+            # Re-enable UFW if it was active (with improved error handling)
+            if [ -f "firewall_config/ufw_status.txt" ] && grep -q "Status: active" "firewall_config/ufw_status.txt"; then
+                log_debug "UFW was active in backup, attempting to re-enable..."
+                
+                # Try to reload UFW rules first
+                if sudo ufw --force reload 2>/dev/null; then
+                    log_debug "UFW rules reloaded successfully"
+                elif sudo ufw --force enable 2>/dev/null; then
+                    log_debug "UFW enabled successfully"
+                else
+                    log_warn "Could not re-enable UFW - may need manual configuration"
+                    log_info "To manually restore firewall:"
+                    log_info "  1. Check UFW status: sudo ufw status"
+                    log_info "  2. Enable UFW: sudo ufw --force enable"
+                    log_info "  3. Review rules: sudo ufw status numbered"
+                fi
+                
+                # Verify UFW status after restoration
+                if sudo ufw status 2>/dev/null | grep -q "Status: active"; then
+                    log_success "Firewall configuration restored and enabled"
+                else
+                    log_warn "Firewall restoration completed but UFW is not active"
+                fi
+            else
+                log_debug "UFW was not active in backup, leaving disabled"
+            fi
+        elif [ -d "firewall_config" ]; then
+            log_warn "UFW not installed on this system - firewall rules from backup cannot be restored"
+            log_info "To restore firewall protection, install UFW: sudo apt-get install ufw"
+        fi
+    else
+        log_debug "No firewall configuration found in backup"
+    fi
+    
+    # Restore Let's Encrypt configuration
+    log_info "Restoring Let's Encrypt configuration..."
+    local letsencrypt_file=$(ls "$temp_dir"/letsencrypt_config_*.tar.gz 2>/dev/null | head -1)
+    if [ -n "$letsencrypt_file" ]; then
+        log_debug "Found Let's Encrypt config file: $(basename "$letsencrypt_file")"
+        cd "$temp_dir"
+        tar -xzf "$(basename "$letsencrypt_file")" 2>/dev/null
+        
+        if [ -d "letsencrypt_config" ]; then
+            # Restore Let's Encrypt directory
+            if [ -f "letsencrypt_config/letsencrypt_etc.tar.gz" ]; then
+                sudo tar -xzf "letsencrypt_config/letsencrypt_etc.tar.gz" -C /etc 2>/dev/null || log_warn "Could not restore Let's Encrypt directory"
+                log_debug "Restored Let's Encrypt account data and certificates"
+            fi
+            
+            # Restore manual DNS auth script
+            if [ -f "letsencrypt_config/manual-dns-auth.sh" ]; then
+                cp "letsencrypt_config/manual-dns-auth.sh" "$n8n_dir/manual-dns-auth.sh"
+                chmod +x "$n8n_dir/manual-dns-auth.sh"
+                log_debug "Restored manual DNS auth script"
+            fi
+            
+            log_success "Let's Encrypt configuration restored"
+        fi
+    else
+        log_debug "No Let's Encrypt configuration found in backup"
+    fi
+    
+    log_function_end "restore_security_components"
     return 0
 }
 
@@ -2510,6 +2871,9 @@ deploy_n8n() {
                 log_info "Database SQL backup found - will restore after containers start"
             fi
             
+            # Restore security components from backup during installation
+            restore_security_components "$TEMP_DIR" "$N8N_DIR"
+            
             # Clean up temp directory will be done later
             # rm -rf "$TEMP_DIR"
         else
@@ -2517,9 +2881,52 @@ deploy_n8n() {
         fi
     fi
     
-    # Generate certificates
+    # Handle certificates after restoration
     if [ ! -f "$N8N_DIR/certs/n8n.crt" ]; then
+        # No certificates in backup - generate fresh ones
         generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
+    elif [ -n "${RESTORE_BACKUP:-}" ]; then
+        # Certificates were restored from backup - check if they need updating
+        log_info "Checking restored certificates for hostname/IP compatibility..."
+        
+        # Check if certificate type is self-signed (not Let's Encrypt)
+        local cert_type=$(grep "^CERTIFICATE_TYPE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+        if [ "$cert_type" != "letsencrypt" ]; then
+            # Self-signed certificate - check for IP mismatch
+            local current_ips=($(hostname -I | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$'))
+            local cert_ips=$(openssl x509 -in "$N8N_DIR/certs/n8n.crt" -text -noout 2>/dev/null | grep -A1 "Subject Alternative Name" | tail -1 | grep -oE 'IP:[0-9.]+' | cut -d: -f2 || true)
+            
+            local ip_mismatch=false
+            if [ -n "$cert_ips" ]; then
+                # Check if any current IPs are missing from certificate
+                for current_ip in "${current_ips[@]}"; do
+                    if ! echo "$cert_ips" | grep -q "$current_ip"; then
+                        ip_mismatch=true
+                        log_warn "Current IP $current_ip not found in restored certificate"
+                        break
+                    fi
+                done
+            else
+                # Certificate has no IP SANs, but we have IPs - regenerate
+                ip_mismatch=true
+                log_warn "Restored certificate has no IP addresses in SAN extensions"
+            fi
+            
+            if [ "$ip_mismatch" = "true" ]; then
+                log_info "IP address mismatch detected - regenerating self-signed certificate with current IP addresses"
+                # Backup old certificate
+                cp "$N8N_DIR/certs/n8n.crt" "$N8N_DIR/certs/n8n.crt.backup.$(date +%Y%m%d_%H%M%S)"
+                cp "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.key.backup.$(date +%Y%m%d_%H%M%S)"
+                
+                # Generate new certificate with current IPs
+                generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
+                log_success "Certificate regenerated with current IP addresses: ${current_ips[*]}"
+            else
+                log_success "Restored certificate is compatible with current hostname/IP"
+            fi
+        else
+            log_info "Let's Encrypt certificate restored - domain-based, no IP dependency"
+        fi
     fi
     
     # Create environment file if not restored

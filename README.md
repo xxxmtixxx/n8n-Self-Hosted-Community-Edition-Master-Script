@@ -236,11 +236,32 @@ The script now uses a unified backup format for:
 - Automatic daily backups
 
 ### Backup Contents
+**Core Components:**
 - PostgreSQL database dump
 - n8n workflows and credentials
 - All configuration files (docker-compose.yml, nginx.conf, .env)
 - SSL certificates
 - Environment variables
+
+**Security Features (v2.1.0+):**
+- DNS provider credentials (Cloudflare, AWS Route53, DigitalOcean, Google Cloud)
+- fail2ban configuration (jails, filters, IP whitelists)
+- UFW firewall rules and configuration
+- Let's Encrypt account data and certificate configurations
+- Manual DNS authentication scripts
+
+**Complete System Restoration:**
+- All security settings are automatically restored during backup restoration
+- Firewall rules are re-enabled if they were active (with compatibility checks)
+- fail2ban service is restarted with restored configurations
+- DNS provider credentials are restored with proper permissions
+- Let's Encrypt renewal automation continues seamlessly
+
+**Cross-Environment Compatibility (v2.1.0+):**
+- **Hostname/IP Migration**: Automatic detection and adaptation to new network environments
+- **Certificate Intelligence**: Self-signed certificates regenerated with new IP addresses, Let's Encrypt certificates preserved
+- **Firewall Resilience**: Enhanced error handling for UFW rule compatibility across different systems
+- **Manual Recovery**: Clear instructions provided when automatic restoration needs assistance
 
 ## 🆙 Updating n8n
 
@@ -314,6 +335,48 @@ When reinstalling after backing up:
 2. Select "Deploy n8n"
 3. Choose from available backups (shows timestamp and size)
 4. All workflows and settings will be restored automatically
+
+#### Cross-System Migration & VM Rebuild
+The backup system now supports **complete cross-system migration** with automatic adaptation to different environments:
+
+**Migration Process:**
+1. **Copy backup** to new system (different hostname/IP/VM)
+2. **Run installation** with backup selection
+3. **Automatic adaptation** handles environment differences
+
+**What Gets Automatically Adapted:**
+- ✅ **SSL Certificates**: Self-signed certificates regenerated with new IP addresses
+- ✅ **Domain Certificates**: Let's Encrypt certificates work unchanged (domain-based)
+- ✅ **Firewall Rules**: UFW configuration restored with compatibility checks
+- ✅ **Security Services**: fail2ban and all configurations restored seamlessly
+- ✅ **DNS Credentials**: All provider credentials restored for certificate renewal
+
+**Migration Scenarios Supported:**
+- Same datacenter, different server
+- Different cloud provider (AWS → GCP → DigitalOcean)
+- Different IP ranges/subnets
+- Different hostnames
+- Different Linux distributions (Ubuntu/Debian variants)
+
+## 🔄 Migration Scenarios Reference
+
+| Migration Type | SSL Certificates | Firewall Rules | Security Services | Manual Steps Required |
+|---|---|---|---|---|
+| **Same IP/Hostname** | ✅ No changes needed | ✅ Direct restore | ✅ Direct restore | None |
+| **Different IP, Same Hostname** | 🔄 Self-signed regenerated<br/>✅ Let's Encrypt preserved | ✅ Automatic adaptation | ✅ Direct restore | None |
+| **Different Hostname** | 🔄 Self-signed regenerated<br/>✅ Let's Encrypt preserved | ✅ Automatic adaptation | ✅ Direct restore | None |
+| **Different Cloud Provider** | 🔄 Self-signed regenerated<br/>✅ Let's Encrypt preserved | ⚠️ UFW validation + fallback | ✅ Direct restore | Possible UFW manual config |
+| **Different Linux Distribution** | 🔄 Self-signed regenerated<br/>✅ Let's Encrypt preserved | ⚠️ Path validation + fallback | ✅ Direct restore | Possible package installation |
+
+**Legend:**
+- ✅ **Automatic**: No intervention required
+- 🔄 **Adapted**: Automatically updated for new environment  
+- ⚠️ **Validated**: Checked with fallback if incompatible
+
+**Certificate Behavior Details:**
+- **Self-Signed**: Always regenerated with new system's IP addresses and hostname
+- **Let's Encrypt**: Domain-based certificates work unchanged on any system
+- **Backup Protection**: Original certificates backed up before regeneration
 
 ## 🔧 Advanced Features
 
@@ -422,6 +485,57 @@ openssl x509 -in ~/n8n/certs/n8n.crt -noout -dates
 
 # Manually renew certificate
 ./n8n-master.sh → 1) Manage n8n → 10) Renew SSL Certificate
+```
+
+### Migration & Cross-System Issues
+Problems after restoring backup to different system:
+
+#### SSL Certificate Not Working on New IP/Hostname
+```bash
+# Check if certificate matches current system
+openssl x509 -in ~/n8n/certs/n8n.crt -text -noout | grep -A5 "Subject Alternative Name"
+
+# Compare with current system IPs
+hostname -I
+
+# If IPs don't match, regenerate certificate:
+rm ~/n8n/certs/n8n.crt ~/n8n/certs/n8n.key
+./n8n-master.sh → 1) Manage n8n → 4) Recreate Services
+```
+
+#### Firewall Rules Not Working
+```bash
+# Check UFW status after restoration
+sudo ufw status verbose
+
+# If UFW failed to enable during restoration:
+sudo ufw --force enable
+
+# If rules are missing, reconfigure manually:
+sudo ufw allow 22/tcp comment 'SSH'
+sudo ufw allow 443/tcp comment 'n8n HTTPS'
+sudo ufw --force enable
+```
+
+#### fail2ban Not Starting
+```bash
+# Check fail2ban status
+sudo systemctl status fail2ban
+
+# If fail2ban config is incompatible:
+sudo systemctl restart fail2ban
+
+# Verify n8n jail is active:
+sudo fail2ban-client status n8n-auth
+```
+
+#### DNS Provider Credentials Missing
+```bash
+# Check if credentials were restored
+ls -la ~/n8n/.*.ini ~/n8n/.google-cloud.json ~/.aws/credentials 2>/dev/null
+
+# If missing, reconfigure Let's Encrypt:
+./n8n-master.sh → 1) Manage n8n → Security & SSL Settings → Configure Let's Encrypt
 ```
 
 ### Database Connection Issues

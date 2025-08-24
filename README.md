@@ -19,7 +19,7 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 - **Interactive Menus**: User-friendly command-line interface with built-in management functions
 - **Direct Commands**: Script automation support with command-line arguments
 
-### 🔒 Enhanced Security Features (v2.1.0)
+### 🔒 Enhanced Security Features (v2.1.0+)
 - **Let's Encrypt Support**: Toggle between self-signed and Let's Encrypt certificates with DNS-01 challenge
 - **Firewall Protection**: UFW firewall with secure default rules (ports 22, 443 only)
 - **Rate Limiting**: Nginx-based rate limiting to prevent abuse and DDoS attacks
@@ -27,6 +27,19 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 - **Automatic Security Updates**: Configurable OS and package security updates
 - **Enhanced SSL/TLS**: Strong ciphers, TLS 1.2/1.3 only, security headers
 - **Security Hardening**: Automated application of all security best practices
+
+### 🌐 Production Internet-Facing Features (v2.1.0+)
+- **Cloudflare Integration**: Automatic CDN/proxy setup with DDoS protection and bot management
+- **Security Auditing**: Built-in comprehensive security audit with actionable recommendations
+- **Advanced Monitoring**: Email, webhook, and log-based security monitoring and alerting
+- **Zero-Configuration Security**: One-click application of enterprise-grade security measures
+
+### 🏠 Dynamic IP & Home Server Features (v2.2.0)
+- **Smart DNS Management**: Automatic detection and preservation of CNAME records for dynamic IPs
+- **Synology DDoS Support**: Native support for synology.me, duckdns.org, no-ip.com services
+- **Closed Port Operation**: DNS-01 certificates + Cloudflare proxy = no open firewall ports needed
+- **Automatic IP Updates**: CNAME records follow dynamic DNS changes seamlessly
+- **Enhanced Migration**: Cross-system backup/restore with automatic IP/hostname adaptation
 
 ## 📋 Requirements
 
@@ -183,7 +196,21 @@ Examples:
 - `https://10.0.1.100` (VPN or secondary network)
 - All detected network interfaces are included in the certificate
 
-**Note**: Port 443 is only exposed internally. For internet access, use SSH tunneling or configure additional security measures.
+### Port Requirements by Setup Type
+
+**🔐 Default Setup (Local/Internal Access Only):**
+- Port 443: Exposed to internal network only
+- Recommended access: SSH tunnel or VPN
+
+**🌐 With Cloudflare Proxy (Internet-Facing):**
+- Port 443: Can remain CLOSED on firewall (Cloudflare routes traffic)
+- DNS-01 certificates: No ports required for SSL certificate generation
+- Ideal for: Dynamic IPs, home servers, enhanced security
+
+**📡 Direct Internet Access (Not Recommended):**
+- Port 443: Must be open for direct access
+- Higher security risk without proxy protection
+- Consider Cloudflare proxy for better security
 
 **Authentication**:
 n8n uses email/password authentication. You'll create your credentials during the initial n8n setup when you first access the interface.
@@ -329,12 +356,26 @@ This removes:
 - Systemd service and cron jobs
 - All data (workflows, database, backups)
 
-### Reinstallation with Backup
-When reinstalling after backing up:
-1. Run `./n8n-master.sh`
-2. Select "Deploy n8n"
-3. Choose from available backups (shows timestamp and size)
-4. All workflows and settings will be restored automatically
+### Fresh Installation with Backup Restore (Recommended)
+
+**Best Method for New VMs or Systems:**
+1. **Download script** on fresh system: `wget https://your-script-url/n8n-master.sh && chmod +x n8n-master.sh`
+2. **Copy backup file** to new system (e.g., `scp backup.tar.gz user@newserver:~/`)
+3. **Run deployment**: `./n8n-master.sh`
+4. **Select "Deploy n8n"**
+5. **Choose backup to restore** (shows timestamp and size)
+
+**What Happens During Installation Restore:**
+- ✅ **Complete dependency installation**: Docker, UFW, fail2ban, certbot, system tools
+- ✅ **Full system configuration**: All security components installed and configured  
+- ✅ **Data restoration**: Database, workflows, configurations, certificates
+- ✅ **Security restoration**: DNS credentials, firewall rules, fail2ban config
+- ✅ **Automatic adaptation**: Certificates and configs adapted to new environment
+
+### Alternative: Menu-Based Restore (Post-Installation)
+After n8n is already installed:
+1. Run `./n8n-master.sh → 1) Manage n8n → 6) Restore Backup`
+2. **Limitation**: Assumes dependencies already installed (doesn't install missing security tools)
 
 #### Cross-System Migration & VM Rebuild
 The backup system now supports **complete cross-system migration** with automatic adaptation to different environments:
@@ -596,9 +637,87 @@ N8N_LOG_LEVEL = "warn"
 tail -100 ~/n8n-operations.log
 ```
 
+## 🏠 Dynamic IP & Home Server Setup
+
+Perfect for home servers, Synology NAS, and dynamic IP environments with enhanced security:
+
+### Benefits of Dynamic IP Support
+
+**🔄 CNAME + Cloudflare Proxy Setup:**
+- ✅ **Automatic IP Updates**: CNAME follows your dynamic DNS service (synology.me, duckdns.org)
+- ✅ **DDoS Protection**: Cloudflare proxy shields your real IP address
+- ✅ **Closed Firewall Ports**: No need to open port 443 on your router/firewall
+- ✅ **SSL Certificates**: DNS-01 challenge works behind closed ports
+- ✅ **No Manual Updates**: Dynamic IP changes handled automatically
+
+### Example: Synology DDoS Setup
+
+**Before n8n-master.sh:**
+```
+Router: Port 443 open → Your Dynamic IP → Synology NAS → n8n
+DNS: CNAME n8n.example.com → whycanti.synology.me
+Issues: ❌ Exposed IP, ❌ No DDoS protection, ❌ Direct attacks possible
+```
+
+**After n8n-master.sh with Cloudflare:**
+```
+Internet → Cloudflare (DDoS protection) → Your Dynamic IP → n8n
+Router: Port 443 can be CLOSED (recommended)
+DNS: CNAME n8n.example.com → whycanti.synology.me (proxy enabled)
+Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Closed ports, ✅ Auto-updates
+```
+
+### Setup Process for Dynamic IPs
+
+1. **Configure Your Dynamic DNS** (if not already done):
+   - Set up synology.me, duckdns.org, or no-ip.com
+   - Ensure your router/NAS updates the record automatically
+
+2. **Deploy n8n**:
+   ```bash
+   ./n8n-master.sh
+   # Select: Deploy n8n
+   ```
+
+3. **Configure Cloudflare Protection**:
+   ```bash
+   ./n8n-master.sh → Security & SSL Settings → Configure Cloudflare Protection
+   ```
+   - Script detects your existing CNAME setup
+   - Recommends keeping CNAME + enabling proxy
+   - Select option 1: "Keep CNAME and enable Cloudflare proxy"
+
+4. **Optional: Close Firewall Port**:
+   - Your n8n is now protected by Cloudflare
+   - You can safely close port 443 on your router/firewall
+   - Traffic routes through Cloudflare's global network
+
+### Supported Dynamic DNS Providers
+
+**Automatically Detected:**
+- ✅ **Synology DDoS**: yourname.synology.me
+- ✅ **Duck DNS**: yourname.duckdns.org  
+- ✅ **No-IP**: yourname.no-ip.com
+- ✅ **Custom Services**: Any CNAME pointing to dynamic hostnames
+
+**Script Behavior:**
+- Preserves existing CNAME configurations
+- Shows clear benefits of your current setup
+- Recommends optimal security enhancements
+- Never forces changes to working configurations
+
 ## 🆕 Recent Improvements
 
-### Version 2.1.0 - Security Enhancements
+### Version 2.2.0 - Enhanced DNS & Dynamic IP Support
+- **Smart DNS Management**: Intelligent CNAME vs A record detection and recommendations
+- **Dynamic IP Support**: Native support for Synology DDoS, Duck DNS, No-IP services  
+- **Enhanced Cloudflare Integration**: Automatic DNS record creation with proxy enablement
+- **DNS-01 Benefits**: No port requirements for SSL certificates (perfect for closed firewalls)
+- **Cross-System Migration**: Enhanced backup/restore with hostname/IP adaptation
+- **Installation-Time Restore**: Complete dependency installation during backup restore
+- **Port Flexibility**: Cloudflare proxy allows closing firewall ports while maintaining access
+
+### Version 2.1.0 - Security Enhancements  
 - **Let's Encrypt Integration**: Support for free SSL certificates with DNS-01 challenge
 - **Firewall Management**: Automated UFW configuration with secure defaults
 - **Rate Limiting**: Comprehensive rate limiting to prevent abuse
@@ -644,10 +763,11 @@ The script now supports both self-signed certificates and Let's Encrypt with DNS
 - **Manual DNS** - Works with any provider (GoDaddy, Namecheap, etc.)
 
 **Benefits of DNS-01 Challenge**:
-- No need to open port 80
-- Works behind firewalls/NAT
-- Wildcard certificate support
-- More secure than HTTP-01
+- ✅ **No ports required**: Port 443 can remain closed (unlike HTTP-01)
+- ✅ **Firewall friendly**: Works behind firewalls, NAT, and closed ports
+- ✅ **Dynamic IP compatible**: Perfect for home servers with changing IPs
+- ✅ **Wildcard support**: Can generate wildcard certificates
+- ✅ **More secure**: No HTTP endpoint exposure required
 
 #### Provider Setup Instructions:
 
@@ -785,24 +905,151 @@ This enables:
 - Rate limiting
 - Security headers
 
+## 🌐 Production Internet-Facing Security
+
+### Cloudflare Integration
+
+Automatically configure Cloudflare for enterprise-grade protection:
+
+```bash
+./n8n-master.sh → Security & SSL Settings → Configure Cloudflare Protection
+```
+
+**What it does:**
+- Creates DNS A record with proxy enabled (orange cloud)
+- Configures rate limiting on authentication endpoints (5 requests/minute)
+- Enables bot protection with JavaScript challenges
+- Sets SSL/TLS mode to "Full" for end-to-end encryption
+- Provides DDoS protection and global CDN
+
+**Requirements:**
+- Domain configured in Cloudflare (nameservers pointing to Cloudflare)
+- Cloudflare API token with Zone permissions
+
+### Enhanced DNS Record Management
+
+The Cloudflare integration includes intelligent DNS record management that preserves existing configurations while providing optimal security:
+
+#### Smart DNS Record Detection
+```bash
+./n8n-master.sh → Security & SSL Settings → Configure Cloudflare Protection
+```
+
+**Automatic Detection:**
+- ✅ **Existing Records**: Detects current DNS configuration and displays record type, target, and proxy status
+- ✅ **Dynamic IP Services**: Recognizes synology.me, duckdns.org, no-ip.com setups
+- ✅ **Smart Recommendations**: Suggests optimal configuration based on your current setup
+
+#### DNS Record Type Options
+
+**For Dynamic IP Setups** (e.g., CNAME pointing to whycanti.synology.me):
+1. **Keep CNAME + Enable Proxy** (Recommended)
+   - ✅ Maintains automatic IP updates
+   - ✅ Adds Cloudflare DDoS protection
+   - ✅ Allows closing firewall ports
+   - ✅ No manual DNS management required
+
+2. **Switch to A Record**
+   - Uses current server's static IP
+   - Good for static IP deployments
+
+**For Static IP Setups**:
+1. **Enable Proxy on Existing Record**
+   - Maintains current configuration
+   - Adds Cloudflare protection
+
+2. **Switch to A Record**
+   - Direct IP pointing
+   - Best for static server IPs
+
+3. **Switch to CNAME**
+   - Good for dynamic IP scenarios
+
+#### Manual DNS Record Creation NOT Required
+
+**The script automatically:**
+- ✅ Creates DNS records via Cloudflare API
+- ✅ Enables Cloudflare proxy (orange cloud)
+- ✅ Configures security rules and rate limiting
+- ✅ No manual DNS panel work needed
+
+**Only Requirement:**
+- Domain added to Cloudflare account (nameservers changed)
+- Valid API token with DNS edit permissions
+
+### Security Auditing
+
+Run comprehensive security audits with actionable recommendations:
+
+```bash
+./n8n-master.sh → Security & SSL Settings → Run Security Audit
+```
+
+**Audit checks:**
+- ✅ SSL certificate status and expiration
+- ✅ Certificate signature algorithm strength
+- ✅ UFW firewall status and rule validation
+- ✅ fail2ban service status and jail configuration
+- ✅ Docker service health
+- ✅ Configuration security (default passwords, encryption keys)
+- ✅ Network port exposure analysis
+
+**Output:**
+- 🛡️ Excellent: No issues found
+- ⚠️ Good: Minor warnings to address
+- 🚨 Critical: Immediate security attention required
+
+### Advanced Security Monitoring
+
+Configure automated security monitoring and alerting:
+
+```bash
+./n8n-master.sh → Security & SSL Settings → Configure Security Monitoring
+```
+
+**Monitoring Options:**
+
+1. **Email Notifications**
+   - SMTP integration for security alerts
+   - Failed login attempt notifications
+   - Certificate expiry warnings
+   - Service failure alerts
+
+2. **Webhook Notifications**
+   - Slack/Discord/Custom webhook integration
+   - Real-time security event notifications
+   - Customizable alert formatting
+
+3. **Log-based Monitoring**
+   - Enhanced security log aggregation
+   - Hourly security status reports
+   - Historical security trend analysis
+
+**Monitoring Frequency:**
+- Email/Webhook: Every 15 minutes
+- Log monitoring: Every hour
+- Certificate checks: Daily
+
 ## ⚠️ Disclaimer
 
-This script now includes enterprise-grade security features suitable for production use. The enhanced security measures include:
-- ✅ Proper SSL certificates (Let's Encrypt with DNS-01)
-- ✅ Configured firewall rules (UFW)
-- ✅ Rate limiting implementation
-- ✅ fail2ban enabled
-- ✅ Automatic security updates
+This script now includes **enterprise-grade security features** suitable for production internet-facing deployments. The comprehensive security implementation includes:
 
-For internet-facing deployments, consider additional measures:
-- Use a reverse proxy/CDN (Cloudflare)
-- Implement application-level authentication
-- Regular security audits
-- Monitoring and alerting
+**✅ Core Security (Built-in):**
+- Proper SSL certificates (Let's Encrypt with DNS-01)
+- Configured firewall rules (UFW)
+- Rate limiting implementation
+- fail2ban intrusion prevention
+- Automatic security updates
+
+**✅ Production Features (Available):**
+- Cloudflare CDN/proxy integration
+- Comprehensive security auditing
+- Advanced monitoring and alerting
+- Automated security hardening
 
 ---
 
-**Version**: 2.1.0  
+**Version**: 2.2.0  
 **Last Updated**: December 2024  
 **Tested On**: Ubuntu 22.04/24.04 LTS, Debian 11/12  
-**Security Level**: Production-Ready with Enhanced Security
+**Security Level**: Production-Ready with Enhanced DNS & Dynamic IP Support

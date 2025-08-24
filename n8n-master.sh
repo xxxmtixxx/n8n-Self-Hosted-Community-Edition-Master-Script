@@ -2501,8 +2501,12 @@ security_settings_menu() {
         printf "8) Configure fail2ban\n"
         printf "9) View fail2ban Status\n"
         printf "10) Configure Automated Updates\n"
+        printf "\n${BOLD}Production Security:${NC}\n"
+        printf "11) Configure Cloudflare Protection\n"
+        printf "12) Run Security Audit\n"
+        printf "13) Configure Security Monitoring\n"
         printf "\n${BOLD}Quick Actions:${NC}\n"
-        printf "11) Apply All Security Hardening\n"
+        printf "14) Apply All Security Hardening\n"
         printf "\n0) Back to Management Menu\n\n"
         printf "Select option: "
         read sec_choice
@@ -2558,6 +2562,15 @@ security_settings_menu() {
                 configure_auto_updates
                 ;;
             11)
+                configure_cloudflare_protection
+                ;;
+            12)
+                run_security_audit
+                ;;
+            13)
+                configure_security_monitoring
+                ;;
+            14)
                 printf "\n${YELLOW}Applying all security hardening measures...${NC}\n"
                 configure_firewall
                 configure_fail2ban
@@ -2575,6 +2588,1047 @@ security_settings_menu() {
                 ;;
         esac
     done
+}
+
+# Extract root domain from subdomain
+extract_root_domain() {
+    local domain="$1"
+    
+    # Handle common cases
+    case "$domain" in
+        # Two-part TLDs (co.uk, com.au, etc.)
+        *.co.uk|*.com.au|*.co.nz|*.co.za|*.com.br)
+            echo "$domain" | awk -F. '{print $(NF-2)"."$(NF-1)"."$NF}'
+            ;;
+        # Three-part domains (regular .com, .net, .org, etc.)
+        *.*)
+            echo "$domain" | awk -F. '{print $(NF-1)"."$NF}'
+            ;;
+        # Already a root domain
+        *)
+            echo "$domain"
+            ;;
+    esac
+}
+
+# Validate Cloudflare API token
+validate_cloudflare_token() {
+    local token="$1"
+    
+    printf "Testing API connectivity..."
+    
+    # Test basic API connectivity first
+    printf " connectivity"
+    local connectivity_test=$(curl -s --max-time 10 --connect-timeout 5 \
+        -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Accept: application/json" 2>&1)
+    
+    local curl_exit_code=$?
+    if [ $curl_exit_code -ne 0 ]; then
+        printf " ${RED}FAILED${NC}\n"
+        case $curl_exit_code in
+            28) log_error "Connection timeout - check your internet connection" ;;
+            6) log_error "Could not resolve api.cloudflare.com - check DNS settings" ;;
+            7) log_error "Failed to connect to api.cloudflare.com - check firewall/proxy" ;;
+            35) log_error "SSL/TLS certificate error - check system time and certificates" ;;
+            *) log_error "Network error (exit code: $curl_exit_code)" ;;
+        esac
+        printf "\n${YELLOW}Troubleshooting steps:${NC}\n"
+        printf "1. Check internet connectivity: ping -c 3 8.8.8.8\n"
+        printf "2. Test DNS resolution: nslookup api.cloudflare.com\n"
+        printf "3. Check system time: date\n"
+        printf "4. Test HTTPS access: curl -I https://www.cloudflare.com\n"
+        printf "\nSkip validation and continue anyway? (y/n): "
+        read skip_validation
+        if [ "$skip_validation" = "y" ] || [ "$skip_validation" = "Y" ]; then
+            printf "${YELLOW}Skipping validation - some features may not work correctly${NC}\n"
+            return 0
+        else
+            return 1
+        fi
+    fi
+    printf " ${GREEN}OK${NC}"
+    
+    # Test token validity
+    printf " • token"
+    local test_response=$(curl -s --max-time 15 --connect-timeout 5 \
+        -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json")
+    
+    curl_exit_code=$?
+    if [ $curl_exit_code -ne 0 ]; then
+        printf " ${RED}TIMEOUT${NC}\n"
+        log_error "API request timed out - network or server issues"
+        printf "\nSkip validation and continue anyway? (y/n): "
+        read skip_validation
+        if [ "$skip_validation" = "y" ] || [ "$skip_validation" = "Y" ]; then
+            printf "${YELLOW}Skipping validation - some features may not work correctly${NC}\n"
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    if echo "$test_response" | grep -q '"success":true'; then
+        printf " ${GREEN}VALID${NC}"
+    else
+        printf " ${RED}INVALID${NC}\n"
+        log_error "API token validation failed"
+        printf "${RED}Error details:${NC} %s\n" "$test_response"
+        printf "\n${YELLOW}Common issues:${NC}\n"
+        printf "• Token has expired\n"
+        printf "• Token was revoked or deleted\n" 
+        printf "• Token format is incorrect\n"
+        return 1
+    fi
+    
+    # Test zone read permissions
+    printf " • permissions"
+    local zones_response=$(curl -s --max-time 15 --connect-timeout 5 \
+        -X GET "https://api.cloudflare.com/client/v4/zones?per_page=1" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json")
+    
+    curl_exit_code=$?
+    if [ $curl_exit_code -ne 0 ]; then
+        printf " ${RED}TIMEOUT${NC}\n"
+        log_error "Zone permissions test timed out"
+        printf "\nContinue without full permission verification? (y/n): "
+        read skip_perms
+        if [ "$skip_perms" = "y" ] || [ "$skip_perms" = "Y" ]; then
+            printf "${YELLOW}Continuing with limited validation${NC}\n"
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    if echo "$zones_response" | grep -q '"success":true'; then
+        printf " ${GREEN}OK${NC}\n"
+        log_debug "Zone read permission confirmed"
+        return 0
+    else
+        printf " ${RED}INSUFFICIENT${NC}\n"
+        log_error "Token lacks Zone:Zone:Read permission"
+        printf "${RED}API Response:${NC} %s\n" "$zones_response"
+        printf "\n${YELLOW}Required token permissions:${NC}\n"
+        printf "• Zone:Zone:Read\n"
+        printf "• Zone:Zone Settings:Edit\n"
+        printf "• Zone:DNS:Edit\n"
+        printf "\n${BLUE}Create a new token at:${NC} https://dash.cloudflare.com/profile/api-tokens\n"
+        return 1
+    fi
+}
+
+# Configure DNS proxy on existing record
+configure_dns_proxy() {
+    local zone_id="$1"
+    local cf_token="$2"
+    local record_id="$3"
+    local record_type="$4"
+    local record_content="$5"
+    local domain="$6"
+    
+    printf "Enabling Cloudflare proxy on existing %s record...\n" "$record_type"
+    
+    local update_response=$(curl -s --max-time 15 \
+        -X PATCH "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data '{
+            "proxied": true
+        }')
+    
+    if echo "$update_response" | grep -q '"success":true'; then
+        log_success "Cloudflare proxy enabled on %s record" "$record_type"
+        printf "✓ %s → %s (proxied)\n" "$domain" "$record_content"
+    else
+        log_error "Failed to enable proxy"
+        printf "${RED}Error:${NC} %s\n" "$update_response"
+        return 1
+    fi
+}
+
+# Configure A record
+configure_dns_a_record() {
+    local zone_id="$1"
+    local cf_token="$2"
+    local record_id="$3"
+    local domain="$4"
+    
+    # Get current server IP
+    printf "Getting current server IP...\n"
+    local server_ip=$(curl -s --max-time 10 ipv4.icanhazip.com || curl -s --max-time 10 ipinfo.io/ip)
+    if [ -z "$server_ip" ]; then
+        log_error "Could not determine server IP address"
+        printf "Enter server IP manually: "
+        read server_ip
+        if [ -z "$server_ip" ]; then
+            return 1
+        fi
+    fi
+    printf "Server IP: ${GREEN}%s${NC}\n" "$server_ip"
+    
+    local method="POST"
+    local url="https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records"
+    
+    if [ -n "$record_id" ]; then
+        method="PATCH"
+        url="https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id"
+        printf "Updating existing record to A record...\n"
+    else
+        printf "Creating new A record...\n"
+    fi
+    
+    local dns_response=$(curl -s --max-time 15 \
+        -X "$method" "$url" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data '{
+            "type": "A",
+            "name": "'$domain'",
+            "content": "'$server_ip'",
+            "ttl": 1,
+            "proxied": true,
+            "comment": "n8n server with Cloudflare protection"
+        }')
+    
+    if echo "$dns_response" | grep -q '"success":true'; then
+        log_success "A record configured with Cloudflare proxy"
+        printf "✓ %s → %s (proxied)\n" "$domain" "$server_ip"
+    else
+        log_error "Failed to configure A record"
+        printf "${RED}Error:${NC} %s\n" "$dns_response"
+        return 1
+    fi
+}
+
+# Configure CNAME record
+configure_dns_cname_record() {
+    local zone_id="$1"
+    local cf_token="$2"
+    local record_id="$3"
+    local domain="$4"
+    
+    printf "Enter the target hostname for CNAME (e.g., whycanti.synology.me): "
+    read cname_target
+    
+    if [ -z "$cname_target" ]; then
+        log_error "CNAME target cannot be empty"
+        return 1
+    fi
+    
+    # Validate CNAME target
+    printf "Validating CNAME target %s...\n" "$cname_target"
+    if ! nslookup "$cname_target" >/dev/null 2>&1; then
+        printf "${YELLOW}Warning:${NC} Could not resolve %s\n" "$cname_target"
+        printf "Continue anyway? (y/n): "
+        read continue_anyway
+        if [ "$continue_anyway" != "y" ] && [ "$continue_anyway" != "Y" ]; then
+            return 1
+        fi
+    else
+        printf "✓ Target resolves correctly\n"
+    fi
+    
+    local method="POST"
+    local url="https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records"
+    
+    if [ -n "$record_id" ]; then
+        method="PATCH"
+        url="https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id"
+        printf "Updating existing record to CNAME...\n"
+    else
+        printf "Creating new CNAME record...\n"
+    fi
+    
+    local dns_response=$(curl -s --max-time 15 \
+        -X "$method" "$url" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data '{
+            "type": "CNAME",
+            "name": "'$domain'",
+            "content": "'$cname_target'",
+            "ttl": 1,
+            "proxied": true,
+            "comment": "n8n CNAME with Cloudflare protection"
+        }')
+    
+    if echo "$dns_response" | grep -q '"success":true'; then
+        log_success "CNAME record configured with Cloudflare proxy"
+        printf "✓ %s → %s (proxied)\n" "$domain" "$cname_target"
+        printf "\n${GREEN}Benefits of your CNAME setup:${NC}\n"
+        printf "• Automatic IP updates when %s changes\n" "$cname_target"
+        printf "• No manual DNS management required\n"
+        printf "• Perfect for dynamic IP addresses\n"
+    else
+        log_error "Failed to configure CNAME record"
+        printf "${RED}Error:${NC} %s\n" "$dns_response"
+        return 1
+    fi
+}
+
+# Configure Cloudflare Protection
+configure_cloudflare_protection() {
+    log_function_start "configure_cloudflare_protection"
+    
+    printf "\n${BLUE}Cloudflare Protection Setup${NC}\n"
+    printf "==========================\n\n"
+    
+    # Check if domain is configured
+    local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    if [ -z "$domain" ]; then
+        printf "${YELLOW}Cloudflare protection requires a domain name.${NC}\n"
+        printf "Please configure Let's Encrypt first to set up your domain.\n\n"
+        printf "Would you like to configure Let's Encrypt now? (y/n): "
+        read setup_le
+        if [ "$setup_le" = "y" ] || [ "$setup_le" = "Y" ]; then
+            setup_letsencrypt
+            domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+            [ -z "$domain" ] && return 1
+        else
+            return 1
+        fi
+    fi
+    
+    printf "Domain: ${GREEN}%s${NC}\n\n" "$domain"
+    
+    # Check for existing Cloudflare credentials
+    local cf_token
+    if [ -f "$N8N_DIR/.cloudflare.ini" ]; then
+        cf_token=$(grep "dns_cloudflare_api_token" "$N8N_DIR/.cloudflare.ini" | cut -d'=' -f2 | xargs)
+        printf "${GREEN}Found existing Cloudflare credentials.${NC}\n"
+    else
+        printf "Cloudflare API token required for protection setup.\n\n"
+        printf "${YELLOW}Creating a Cloudflare API Token:${NC}\n"
+        printf "1. Go to: https://dash.cloudflare.com/profile/api-tokens\n"
+        printf "2. Click 'Create Token'\n"
+        printf "3. Use 'Custom token' template\n"
+        printf "4. Set permissions:\n"
+        printf "   - Zone:Zone Settings:Edit\n"
+        printf "   - Zone:Zone:Read\n"
+        printf "   - Zone:DNS:Edit\n"
+        printf "5. Set zone resources to include your domain\n"
+        printf "6. Create and copy the token\n\n"
+        
+        printf "Enter your Cloudflare API token: "
+        read -s cf_token
+        printf "\n"
+        
+        # Save token
+        cat > "$N8N_DIR/.cloudflare.ini" << EOF
+dns_cloudflare_api_token = $cf_token
+EOF
+        chmod 600 "$N8N_DIR/.cloudflare.ini"
+    fi
+    
+    # Validate API token first
+    printf "Validating Cloudflare API token...\n"
+    if ! validate_cloudflare_token "$cf_token"; then
+        printf "\n${YELLOW}Please check your API token and try again.${NC}\n"
+        printf "Press Enter to continue..."
+        read
+        return 1
+    fi
+    
+    # Extract root domain for zone lookup
+    local root_domain=$(extract_root_domain "$domain")
+    printf "Full domain: ${CYAN}%s${NC}\n" "$domain"
+    printf "Root domain: ${CYAN}%s${NC}\n" "$root_domain"
+    
+    # Get Zone ID using root domain  
+    printf "Getting Cloudflare zone information for %s..." "$root_domain"
+    local zone_response=$(curl -s --max-time 15 --connect-timeout 5 \
+        -X GET "https://api.cloudflare.com/client/v4/zones?name=$root_domain" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json")
+    
+    local curl_exit_code=$?
+    if [ $curl_exit_code -ne 0 ]; then
+        printf " ${RED}TIMEOUT${NC}\n"
+        log_error "Zone lookup timed out (exit code: $curl_exit_code)"
+        printf "\nTry again or enter zone ID manually? (retry/manual/quit): "
+        read retry_choice
+        case $retry_choice in
+            "retry"|"r")
+                printf "Retrying zone lookup...\n"
+                return 1
+                ;;
+            "manual"|"m")
+                printf "Enter your zone ID manually: "
+                read manual_zone_id
+                if [ -n "$manual_zone_id" ]; then
+                    zone_id="$manual_zone_id"
+                    printf " ${GREEN}OK${NC}\n"
+                else
+                    return 1
+                fi
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    else
+        printf " ${GREEN}OK${NC}\n"
+        log_debug "Zone API response: $zone_response"
+        
+        # Extract zone ID from response
+        local zone_id=$(echo "$zone_response" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+    fi
+    
+    if [ -z "$zone_id" ]; then
+        log_error "Could not find Cloudflare zone for domain: $root_domain"
+        printf "\n${RED}Debugging information:${NC}\n"
+        printf "• Searched for zone: %s\n" "$root_domain"
+        printf "• API Response: %s\n" "$zone_response"
+        
+        # Check if API response contains any zones
+        local zone_count=$(echo "$zone_response" | grep -o '"name":"[^"]*' | wc -l)
+        if [ $zone_count -gt 0 ]; then
+            printf "\n${YELLOW}Available zones in your account:${NC}\n"
+            echo "$zone_response" | grep -o '"name":"[^"]*' | cut -d'"' -f4 | while read zone_name; do
+                printf "• %s\n" "$zone_name"
+            done
+            printf "\nPlease ensure '%s' matches one of the zones above.\n" "$root_domain"
+        else
+            printf "\n${YELLOW}No zones found in your Cloudflare account.${NC}\n"
+            printf "Please ensure:\n"
+            printf "1. Domain '%s' is added to your Cloudflare account\n" "$root_domain"
+            printf "2. API token has Zone:Zone:Read permission\n"
+            printf "3. Token scope includes the zone\n"
+        fi
+        
+        printf "\n${BLUE}Manual zone ID entry:${NC}\n"
+        printf "If you know your zone ID, enter it manually: "
+        read manual_zone_id
+        
+        if [ -n "$manual_zone_id" ]; then
+            zone_id="$manual_zone_id"
+            printf "Using manual zone ID: ${GREEN}%s${NC}\n" "$zone_id"
+        else
+            return 1
+        fi
+    fi
+    
+    printf "Zone ID: ${GREEN}%s${NC}\n\n" "$zone_id"
+    
+    # Check existing DNS records first
+    printf "Checking existing DNS records for %s...\n" "$domain"
+    local existing_records=$(curl -s --max-time 10 \
+        -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?name=$domain" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json")
+    
+    local existing_type=$(echo "$existing_records" | grep -o '"type":"[^"]*' | head -1 | cut -d'"' -f4)
+    local existing_content=$(echo "$existing_records" | grep -o '"content":"[^"]*' | head -1 | cut -d'"' -f4)
+    local existing_proxied=$(echo "$existing_records" | grep -o '"proxied":[^,]*' | head -1 | cut -d':' -f2)
+    local record_id=$(echo "$existing_records" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+    
+    if [ -n "$existing_type" ]; then
+        printf "\n${BLUE}Current DNS Configuration:${NC}\n"
+        printf "Record Type: ${YELLOW}%s${NC}\n" "$existing_type"
+        printf "Points to: ${YELLOW}%s${NC}\n" "$existing_content"
+        printf "Cloudflare Proxy: ${YELLOW}%s${NC}\n" "$existing_proxied"
+        printf "\n"
+        
+        # Provide smart recommendations
+        if [[ "$existing_content" == *".synology.me" ]] || [[ "$existing_content" == *".duckdns.org" ]] || [[ "$existing_content" == *".no-ip.com" ]]; then
+            printf "${GREEN}✓ Detected dynamic IP setup${NC}\n"
+            printf "Your current CNAME setup is ideal for dynamic IPs.\n\n"
+            
+            printf "Options:\n"
+            printf "1) Keep CNAME and enable Cloudflare proxy (recommended)\n"
+            printf "2) Switch to A record with current server IP\n"
+            printf "3) Cancel and keep current settings\n"
+            printf "\nSelect option (1-3): "
+        else
+            printf "Current setup uses %s record.\n\n" "$existing_type"
+            printf "Options:\n"
+            printf "1) Keep current record type and enable Cloudflare proxy\n"
+            printf "2) Switch to A record with current server IP\n"
+            printf "3) Switch to CNAME (for dynamic IP setups)\n"
+            printf "4) Cancel and keep current settings\n"
+            printf "\nSelect option (1-4): "
+        fi
+        
+        read dns_choice
+        
+        case $dns_choice in
+            1)
+                # Enable proxy on existing record
+                configure_dns_proxy "$zone_id" "$cf_token" "$record_id" "$existing_type" "$existing_content" "$domain"
+                ;;
+            2)
+                # Switch to A record
+                configure_dns_a_record "$zone_id" "$cf_token" "$record_id" "$domain"
+                ;;
+            3)
+                if [[ "$existing_content" == *".synology.me" ]] || [[ "$existing_content" == *".duckdns.org" ]]; then
+                    # Cancel option for dynamic IP setups
+                    printf "Keeping current settings unchanged.\n"
+                    return 0
+                else
+                    # CNAME option for static setups
+                    configure_dns_cname_record "$zone_id" "$cf_token" "$record_id" "$domain"
+                fi
+                ;;
+            4|*)
+                if [[ "$existing_content" != *".synology.me" ]]; then
+                    printf "Keeping current settings unchanged.\n"
+                    return 0
+                else
+                    configure_dns_cname_record "$zone_id" "$cf_token" "$record_id" "$domain"
+                fi
+                ;;
+        esac
+    else
+        printf "${YELLOW}No existing DNS record found for %s${NC}\n\n" "$domain"
+        printf "Choose DNS record type:\n"
+        printf "1) A record - Points to server IP address (best for static IPs)\n"
+        printf "2) CNAME record - Points to hostname (best for dynamic IPs)\n"
+        printf "\nSelect option (1-2): "
+        read dns_choice
+        
+        case $dns_choice in
+            1)
+                configure_dns_a_record "$zone_id" "$cf_token" "" "$domain"
+                ;;
+            2)
+                configure_dns_cname_record "$zone_id" "$cf_token" "" "$domain"
+                ;;
+            *)
+                log_error "Invalid option"
+                return 1
+                ;;
+        esac
+    fi
+    
+    # Configure security rules
+    printf "\nConfiguring Cloudflare security rules...\n"
+    
+    # Rate limiting rule for authentication endpoints
+    local rate_limit_response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone_id/rate_limits" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data '{
+            "match": {
+                "request": {
+                    "url": "*'$domain'/rest/login*"
+                }
+            },
+            "threshold": 5,
+            "period": 60,
+            "action": {
+                "mode": "ban",
+                "timeout": 3600,
+                "response": {
+                    "content_type": "application/json",
+                    "body": "{\"error\": \"Rate limit exceeded\"}"
+                }
+            },
+            "description": "n8n login rate limiting"
+        }')
+    
+    # Bot protection
+    printf "Enabling bot protection...\n"
+    local bot_response=$(curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$zone_id/settings/bot_management" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data '{"value": {"enable_js": true, "sb_im": "block", "sb_ml": "challenge"}}')
+    
+    # SSL settings
+    printf "Configuring SSL settings...\n"
+    local ssl_response=$(curl -s -X PATCH "https://api.cloudflare.com/client/v4/zones/$zone_id/settings/ssl" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data '{"value": "full"}')
+    
+    # Save configuration
+    echo "CLOUDFLARE_ZONE_ID=$zone_id" >> "$N8N_DIR/.env"
+    echo "CLOUDFLARE_PROTECTION_ENABLED=true" >> "$N8N_DIR/.env"
+    
+    printf "\n${GREEN}Cloudflare protection configured successfully!${NC}\n\n"
+    printf "Features enabled:\n"
+    printf "✓ DNS proxy (orange cloud) for DDoS protection\n"
+    printf "✓ Rate limiting on login endpoints (5 requests/minute)\n"
+    printf "✓ Bot protection with JavaScript challenges\n"
+    printf "✓ SSL/TLS encryption (Full mode)\n\n"
+    
+    printf "Additional recommendations:\n"
+    printf "• Enable 'Under Attack Mode' during active threats\n"
+    printf "• Configure geographic restrictions if needed\n"
+    printf "• Set up Cloudflare Access for additional authentication\n\n"
+    
+    log_function_end "configure_cloudflare_protection"
+    printf "Press Enter to continue..."
+    read
+}
+
+# Run Security Audit
+run_security_audit() {
+    log_function_start "run_security_audit"
+    
+    printf "\n${BLUE}Security Audit Report${NC}\n"
+    printf "====================\n\n"
+    
+    local issues=0
+    local warnings=0
+    
+    # Check SSL certificate
+    printf "${BOLD}SSL Certificate Status:${NC}\n"
+    if [ -f "$N8N_DIR/certs/n8n.crt" ]; then
+        local cert_expiry=$(openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -enddate | cut -d= -f2)
+        local cert_days=$(( ($(date -d "$cert_expiry" +%s) - $(date +%s)) / 86400 ))
+        
+        if [ $cert_days -lt 7 ]; then
+            printf "❌ Certificate expires in ${RED}%d days${NC} (%s)\n" "$cert_days" "$cert_expiry"
+            ((issues++))
+        elif [ $cert_days -lt 30 ]; then
+            printf "⚠️  Certificate expires in ${YELLOW}%d days${NC} (%s)\n" "$cert_days" "$cert_expiry"
+            ((warnings++))
+        else
+            printf "✅ Certificate valid for ${GREEN}%d days${NC}\n" "$cert_days"
+        fi
+        
+        # Check certificate algorithm
+        local cert_algo=$(openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -text | grep "Signature Algorithm" | head -1 | awk '{print $3}')
+        if [[ "$cert_algo" == *"sha1"* ]]; then
+            printf "❌ Certificate uses weak ${RED}SHA-1${NC} algorithm\n"
+            ((issues++))
+        else
+            printf "✅ Certificate uses strong signature algorithm\n"
+        fi
+    else
+        printf "❌ ${RED}No SSL certificate found${NC}\n"
+        ((issues++))
+    fi
+    
+    # Check firewall status
+    printf "\n${BOLD}Firewall Configuration:${NC}\n"
+    if command -v ufw &> /dev/null; then
+        if sudo ufw status | grep -q "Status: active"; then
+            printf "✅ UFW firewall is enabled\n"
+            
+            # Check for proper rules
+            local ssh_rule=$(sudo ufw status | grep -E "(22|ssh)" | wc -l)
+            local https_rule=$(sudo ufw status | grep -E "(443|https)" | wc -l)
+            
+            if [ $ssh_rule -eq 0 ]; then
+                printf "⚠️  ${YELLOW}No SSH rule found${NC} (may lock you out)\n"
+                ((warnings++))
+            fi
+            
+            if [ $https_rule -eq 0 ]; then
+                printf "❌ ${RED}No HTTPS rule found${NC} (n8n may be inaccessible)\n"
+                ((issues++))
+            fi
+        else
+            printf "❌ ${RED}UFW firewall is disabled${NC}\n"
+            ((issues++))
+        fi
+    else
+        printf "❌ ${RED}UFW firewall not installed${NC}\n"
+        ((issues++))
+    fi
+    
+    # Check fail2ban status
+    printf "\n${BOLD}Intrusion Prevention:${NC}\n"
+    if command -v fail2ban-client &> /dev/null; then
+        if systemctl is-active --quiet fail2ban; then
+            printf "✅ fail2ban is active\n"
+            
+            # Check n8n jail
+            if sudo fail2ban-client status | grep -q "n8n-auth"; then
+                printf "✅ n8n authentication jail is configured\n"
+                
+                # Check banned IPs
+                local banned_count=$(sudo fail2ban-client status n8n-auth | grep "Currently banned" | awk '{print $4}' || echo "0")
+                if [ $banned_count -gt 0 ]; then
+                    printf "ℹ️  Currently blocking ${YELLOW}%s${NC} IP(s)\n" "$banned_count"
+                fi
+            else
+                printf "⚠️  ${YELLOW}n8n jail not configured${NC}\n"
+                ((warnings++))
+            fi
+        else
+            printf "❌ ${RED}fail2ban is not running${NC}\n"
+            ((issues++))
+        fi
+    else
+        printf "❌ ${RED}fail2ban not installed${NC}\n"
+        ((issues++))
+    fi
+    
+    # Check service status
+    printf "\n${BOLD}Service Status:${NC}\n"
+    cd "$N8N_DIR"
+    local services=("nginx" "postgres" "n8n")
+    for service in "${services[@]}"; do
+        local status=$(docker compose ps --format '{{.Service}} {{.Status}}' | grep "^$service " | awk '{print $2}')
+        if [[ "$status" == *"Up"* ]]; then
+            printf "✅ %s is running\n" "$service"
+        else
+            printf "❌ ${RED}%s is not running${NC}\n" "$service"
+            ((issues++))
+        fi
+    done
+    
+    # Check for weak configurations
+    printf "\n${BOLD}Configuration Security:${NC}\n"
+    
+    # Check for default passwords
+    if grep -q "admin:admin" "$N8N_DIR/.env" 2>/dev/null; then
+        printf "❌ ${RED}Default admin credentials detected${NC}\n"
+        ((issues++))
+    else
+        printf "✅ Custom admin credentials configured\n"
+    fi
+    
+    # Check encryption key
+    if grep -q "^N8N_ENCRYPTION_KEY=" "$N8N_DIR/.env" 2>/dev/null; then
+        printf "✅ Encryption key is configured\n"
+    else
+        printf "⚠️  ${YELLOW}No encryption key found${NC}\n"
+        ((warnings++))
+    fi
+    
+    # Check for exposed ports
+    printf "\n${BOLD}Network Exposure:${NC}\n"
+    local open_ports=$(netstat -tuln 2>/dev/null | grep LISTEN | grep -E ":80|:443|:5432|:5678" | wc -l)
+    if [ $open_ports -gt 0 ]; then
+        printf "ℹ️  Found %d listening ports (review for necessity)\n" "$open_ports"
+        netstat -tuln 2>/dev/null | grep LISTEN | grep -E ":80|:443|:5432|:5678" | while read line; do
+            printf "   %s\n" "$line"
+        done
+    fi
+    
+    # Summary
+    printf "\n${BOLD}Security Audit Summary:${NC}\n"
+    printf "======================\n"
+    
+    if [ $issues -eq 0 ] && [ $warnings -eq 0 ]; then
+        printf "${GREEN}🛡️  Excellent security posture!${NC}\n"
+        printf "No issues or warnings found.\n"
+    elif [ $issues -eq 0 ]; then
+        printf "${YELLOW}⚠️  Good security with %d warning(s)${NC}\n" "$warnings"
+        printf "Consider addressing warnings for optimal security.\n"
+    else
+        printf "${RED}🚨 Security issues require attention${NC}\n"
+        printf "Found: %d critical issues, %d warnings\n" "$issues" "$warnings"
+        printf "\nRecommended actions:\n"
+        printf "1. Address all critical issues immediately\n"
+        printf "2. Review and resolve warnings\n"
+        printf "3. Run audit again after fixes\n"
+    fi
+    
+    log_function_end "run_security_audit"
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# Configure Security Monitoring
+configure_security_monitoring() {
+    log_function_start "configure_security_monitoring"
+    
+    printf "\n${BLUE}Security Monitoring Setup${NC}\n"
+    printf "=========================\n\n"
+    
+    printf "Configure notification methods for security events:\n\n"
+    
+    printf "1) Email notifications\n"
+    printf "2) Webhook notifications (Slack, Discord, etc.)\n"
+    printf "3) Log-based monitoring only\n"
+    printf "0) Cancel\n\n"
+    printf "Select option: "
+    read monitor_choice
+    
+    case $monitor_choice in
+        1)
+            configure_email_monitoring
+            ;;
+        2)
+            configure_webhook_monitoring
+            ;;
+        3)
+            configure_log_monitoring
+            ;;
+        0)
+            return
+            ;;
+        *)
+            log_error "Invalid option"
+            return 1
+            ;;
+    esac
+    
+    log_function_end "configure_security_monitoring"
+}
+
+# Configure Email Monitoring
+configure_email_monitoring() {
+    printf "\n${BLUE}Email Monitoring Setup${NC}\n"
+    printf "======================\n\n"
+    
+    printf "Enter SMTP server (e.g., smtp.gmail.com): "
+    read smtp_server
+    
+    printf "Enter SMTP port (usually 587 for TLS): "
+    read smtp_port
+    
+    printf "Enter email address for notifications: "
+    read notification_email
+    
+    printf "Enter sender email address: "
+    read sender_email
+    
+    printf "Enter sender email password (will be hidden): "
+    read -s sender_password
+    printf "\n"
+    
+    # Save monitoring configuration
+    cat >> "$N8N_DIR/.env" << EOF
+MONITORING_ENABLED=true
+MONITORING_TYPE=email
+SMTP_SERVER=$smtp_server
+SMTP_PORT=$smtp_port
+NOTIFICATION_EMAIL=$notification_email
+SENDER_EMAIL=$sender_email
+SENDER_PASSWORD=$sender_password
+EOF
+    
+    # Create monitoring script
+    cat > "$N8N_DIR/scripts/security_monitor.sh" << 'EOF'
+#!/bin/bash
+
+# Security monitoring script
+LOG_FILE="$HOME/n8n-operations.log"
+ALERT_LOG="/tmp/n8n_security_alerts.log"
+
+# Source environment variables
+source "$HOME/n8n/.env"
+
+send_email_alert() {
+    local subject="$1"
+    local body="$2"
+    
+    python3 -c "
+import smtplib
+from email.mime.text import MimeText
+from email.mime.multipart import MimeMultipart
+import os
+
+smtp_server = os.environ.get('SMTP_SERVER')
+smtp_port = int(os.environ.get('SMTP_PORT', 587))
+sender_email = os.environ.get('SENDER_EMAIL')
+sender_password = os.environ.get('SENDER_PASSWORD')
+notification_email = os.environ.get('NOTIFICATION_EMAIL')
+
+msg = MimeMultipart()
+msg['From'] = sender_email
+msg['To'] = notification_email
+msg['Subject'] = '$subject'
+msg.attach(MimeText('$body', 'plain'))
+
+try:
+    server = smtplib.SMTP(smtp_server, smtp_port)
+    server.starttls()
+    server.login(sender_email, sender_password)
+    server.send_message(msg)
+    server.quit()
+    print('Alert sent successfully')
+except Exception as e:
+    print(f'Failed to send alert: {e}')
+"
+}
+
+# Check for failed logins
+failed_logins=$(grep -c "401.*rest/login" "$LOG_FILE" 2>/dev/null || echo "0")
+if [ $failed_logins -gt 10 ]; then
+    echo "$(date): High number of failed logins detected ($failed_logins)" >> "$ALERT_LOG"
+    send_email_alert "n8n Security Alert: Failed Logins" "Detected $failed_logins failed login attempts. Please review security logs."
+fi
+
+# Check certificate expiry
+if [ -f "$HOME/n8n/certs/n8n.crt" ]; then
+    cert_days=$(( ($(date -d "$(openssl x509 -in "$HOME/n8n/certs/n8n.crt" -noout -enddate | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
+    if [ $cert_days -lt 7 ]; then
+        echo "$(date): SSL certificate expires in $cert_days days" >> "$ALERT_LOG"
+        send_email_alert "n8n Security Alert: Certificate Expiry" "SSL certificate expires in $cert_days days. Please renew immediately."
+    fi
+fi
+
+# Check for service failures
+if ! docker compose -f "$HOME/n8n/docker-compose.yml" ps | grep -q "Up"; then
+    echo "$(date): Service failure detected" >> "$ALERT_LOG"
+    send_email_alert "n8n Security Alert: Service Down" "One or more n8n services are not running. Please check system status."
+fi
+EOF
+
+    chmod +x "$N8N_DIR/scripts/security_monitor.sh"
+    
+    # Add to cron
+    (crontab -l 2>/dev/null | grep -v "security_monitor.sh"; echo "*/15 * * * * $N8N_DIR/scripts/security_monitor.sh") | crontab -
+    
+    log_success "Email monitoring configured"
+    printf "Security alerts will be sent to: ${GREEN}%s${NC}\n" "$notification_email"
+    printf "Monitoring runs every 15 minutes\n"
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# Configure Webhook Monitoring
+configure_webhook_monitoring() {
+    printf "\n${BLUE}Webhook Monitoring Setup${NC}\n"
+    printf "========================\n\n"
+    
+    printf "Enter webhook URL (Slack, Discord, or custom): "
+    read webhook_url
+    
+    printf "Enter webhook type (slack/discord/custom): "
+    read webhook_type
+    
+    # Save monitoring configuration
+    cat >> "$N8N_DIR/.env" << EOF
+MONITORING_ENABLED=true
+MONITORING_TYPE=webhook
+WEBHOOK_URL=$webhook_url
+WEBHOOK_TYPE=$webhook_type
+EOF
+    
+    # Create webhook monitoring script
+    cat > "$N8N_DIR/scripts/webhook_monitor.sh" << 'EOF'
+#!/bin/bash
+
+# Webhook monitoring script
+LOG_FILE="$HOME/n8n-operations.log"
+ALERT_LOG="/tmp/n8n_security_alerts.log"
+
+# Source environment variables
+source "$HOME/n8n/.env"
+
+send_webhook_alert() {
+    local message="$1"
+    local webhook_url="$WEBHOOK_URL"
+    local webhook_type="$WEBHOOK_TYPE"
+    
+    case $webhook_type in
+        "slack")
+            curl -X POST -H 'Content-type: application/json' \
+                --data "{\"text\":\"🚨 n8n Security Alert: $message\"}" \
+                "$webhook_url"
+            ;;
+        "discord")
+            curl -X POST -H 'Content-Type: application/json' \
+                --data "{\"content\":\"🚨 **n8n Security Alert**: $message\"}" \
+                "$webhook_url"
+            ;;
+        "custom")
+            curl -X POST -H 'Content-Type: application/json' \
+                --data "{\"alert\":\"n8n Security Alert\",\"message\":\"$message\",\"timestamp\":\"$(date)\"}" \
+                "$webhook_url"
+            ;;
+    esac
+}
+
+# Monitor security events (same checks as email version)
+failed_logins=$(grep -c "401.*rest/login" "$LOG_FILE" 2>/dev/null || echo "0")
+if [ $failed_logins -gt 10 ]; then
+    echo "$(date): High number of failed logins detected ($failed_logins)" >> "$ALERT_LOG"
+    send_webhook_alert "High number of failed logins detected ($failed_logins)"
+fi
+
+# Check certificate expiry
+if [ -f "$HOME/n8n/certs/n8n.crt" ]; then
+    cert_days=$(( ($(date -d "$(openssl x509 -in "$HOME/n8n/certs/n8n.crt" -noout -enddate | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
+    if [ $cert_days -lt 7 ]; then
+        echo "$(date): SSL certificate expires in $cert_days days" >> "$ALERT_LOG"
+        send_webhook_alert "SSL certificate expires in $cert_days days"
+    fi
+fi
+
+# Check for service failures
+if ! docker compose -f "$HOME/n8n/docker-compose.yml" ps | grep -q "Up"; then
+    echo "$(date): Service failure detected" >> "$ALERT_LOG"
+    send_webhook_alert "One or more n8n services are not running"
+fi
+EOF
+
+    chmod +x "$N8N_DIR/scripts/webhook_monitor.sh"
+    
+    # Add to cron
+    (crontab -l 2>/dev/null | grep -v "webhook_monitor.sh"; echo "*/15 * * * * $N8N_DIR/scripts/webhook_monitor.sh") | crontab -
+    
+    log_success "Webhook monitoring configured"
+    printf "Security alerts will be sent to: ${GREEN}%s${NC}\n" "$webhook_url"
+    printf "Monitoring runs every 15 minutes\n"
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# Configure Log Monitoring
+configure_log_monitoring() {
+    printf "\n${BLUE}Log-based Monitoring Setup${NC}\n"
+    printf "===========================\n\n"
+    
+    # Save monitoring configuration
+    cat >> "$N8N_DIR/.env" << EOF
+MONITORING_ENABLED=true
+MONITORING_TYPE=log
+EOF
+    
+    # Enhance log monitoring
+    cat > "$N8N_DIR/scripts/log_monitor.sh" << 'EOF'
+#!/bin/bash
+
+# Enhanced log monitoring script
+LOG_FILE="$HOME/n8n-operations.log"
+SECURITY_LOG="$HOME/n8n-security.log"
+
+# Create security-specific log
+mkdir -p "$(dirname "$SECURITY_LOG")"
+
+# Analyze recent activity
+echo "=== Security Log Entry: $(date) ===" >> "$SECURITY_LOG"
+
+# Failed login attempts
+failed_logins=$(grep "401.*rest/login" "$LOG_FILE" 2>/dev/null | tail -10)
+if [ -n "$failed_logins" ]; then
+    echo "Recent failed logins:" >> "$SECURITY_LOG"
+    echo "$failed_logins" >> "$SECURITY_LOG"
+fi
+
+# Certificate status
+if [ -f "$HOME/n8n/certs/n8n.crt" ]; then
+    cert_days=$(( ($(date -d "$(openssl x509 -in "$HOME/n8n/certs/n8n.crt" -noout -enddate | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
+    echo "Certificate expires in $cert_days days" >> "$SECURITY_LOG"
+fi
+
+# fail2ban status
+if command -v fail2ban-client &> /dev/null; then
+    banned_count=$(sudo fail2ban-client status n8n-auth 2>/dev/null | grep "Currently banned" | awk '{print $4}' || echo "0")
+    echo "Currently banned IPs: $banned_count" >> "$SECURITY_LOG"
+fi
+
+# Service status
+echo "Service status:" >> "$SECURITY_LOG"
+docker compose -f "$HOME/n8n/docker-compose.yml" ps --format 'table' >> "$SECURITY_LOG" 2>/dev/null
+
+echo "" >> "$SECURITY_LOG"
+EOF
+
+    chmod +x "$N8N_DIR/scripts/log_monitor.sh"
+    
+    # Add to cron for hourly logging
+    (crontab -l 2>/dev/null | grep -v "log_monitor.sh"; echo "0 * * * * $N8N_DIR/scripts/log_monitor.sh") | crontab -
+    
+    log_success "Log-based monitoring configured"
+    printf "Security logs will be written to: ${GREEN}%s${NC}\n" "$HOME/n8n-security.log"
+    printf "Monitoring runs every hour\n"
+    printf "\nView security logs with: ${CYAN}tail -f ~/n8n-security.log${NC}\n"
+    printf "\nPress Enter to continue..."
+    read
 }
 
 # Manage environment variables

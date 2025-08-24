@@ -203,9 +203,10 @@ Examples:
 - Recommended access: SSH tunnel or VPN
 
 **🌐 With Cloudflare Proxy (Internet-Facing):**
-- Port 443: Can remain CLOSED on firewall (Cloudflare routes traffic)
+- Port 443: Must be open for Cloudflare to connect OR restricted to Cloudflare IPs only
 - DNS-01 certificates: No ports required for SSL certificate generation
 - Ideal for: Dynamic IPs, home servers, enhanced security
+- **NEW**: Use Cloudflare IP Whitelist feature for secure restricted access
 
 **📡 Direct Internet Access (Not Recommended):**
 - Port 443: Must be open for direct access
@@ -497,6 +498,38 @@ tail -50 ~/n8n-operations.log
 ./n8n-master.sh → 1) Manage n8n → 4) Recreate Services
 ```
 
+### Cloudflare Proxy Connection Timeout
+
+If you get connection timeouts after enabling Cloudflare proxy:
+
+```bash
+# Option 1: Enable Cloudflare IP Whitelist (Recommended)
+./n8n-master.sh → Security & SSL Settings → Cloudflare IP Whitelist Management → Enable
+
+# Option 2: Open port 443 to all (Less Secure)
+sudo ufw allow 443/tcp
+sudo ufw reload
+
+# Option 3: Manual Cloudflare IP whitelist
+curl https://www.cloudflare.com/ips-v4 -o /tmp/cf-ips.txt
+while read ip; do sudo ufw allow from $ip to any port 443; done < /tmp/cf-ips.txt
+```
+
+**Verification Commands:**
+```bash
+# Check if domain resolves to Cloudflare IPs
+dig +short your.domain.com
+
+# Verify proxy is enabled (should show Cloudflare IPs, not your server IP)
+# Should return IPs like 104.21.x.x or 172.67.x.x
+
+# Check local connectivity
+curl -k https://localhost  # Should work from server
+
+# Check UFW rules
+sudo ufw status numbered | grep 443
+```
+
 ### Locked Out by fail2ban
 ```bash
 # If you're accidentally banned by fail2ban:
@@ -712,10 +745,11 @@ Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Closed ports, ✅ Auto-updates
 - **Smart DNS Management**: Intelligent CNAME vs A record detection and recommendations
 - **Dynamic IP Support**: Native support for Synology DDoS, Duck DNS, No-IP services  
 - **Enhanced Cloudflare Integration**: Automatic DNS record creation with proxy enablement
+- **Cloudflare IP Whitelist**: Restrict port 443 to only Cloudflare IPs for enhanced security
 - **DNS-01 Benefits**: No port requirements for SSL certificates (perfect for closed firewalls)
 - **Cross-System Migration**: Enhanced backup/restore with hostname/IP adaptation
 - **Installation-Time Restore**: Complete dependency installation during backup restore
-- **Port Flexibility**: Cloudflare proxy allows closing firewall ports while maintaining access
+- **Corrected Documentation**: Accurate port requirements for Cloudflare proxy configurations
 
 ### Version 2.1.0 - Security Enhancements  
 - **Let's Encrypt Integration**: Support for free SSL certificates with DNS-01 challenge
@@ -925,6 +959,72 @@ Automatically configure Cloudflare for enterprise-grade protection:
 **Requirements:**
 - Domain configured in Cloudflare (nameservers pointing to Cloudflare)
 - Cloudflare API token with Zone permissions
+
+### Cloudflare IP Whitelist Management (v2.2.0)
+
+Restrict port 443 access to only Cloudflare IP addresses for enhanced security while maintaining proxy functionality:
+
+#### Access the Feature
+```bash
+./n8n-master.sh → Security & SSL Settings → Cloudflare IP Whitelist Management
+```
+
+#### Features
+1. **Enable Cloudflare IP Whitelist**
+   - Fetches current Cloudflare IP ranges (IPv4 and IPv6)
+   - Removes generic port 443 rules
+   - Adds UFW rules for each Cloudflare IP range
+   - Backs up current firewall configuration
+   - Port 443 restricted to Cloudflare servers only
+
+2. **Remove Cloudflare IP Whitelist**
+   - Removes all Cloudflare-specific rules
+   - Restores standard port 443 access (open to all)
+   - Maintains all other firewall rules
+
+3. **Update Cloudflare IP List**
+   - Refreshes IP ranges from Cloudflare
+   - Updates rules with any IP changes
+   - Maintains uninterrupted service
+
+4. **Show Whitelist Status**
+   - Displays current whitelist state
+   - Shows active rule count
+   - Provides test commands
+
+#### How It Works
+```
+Internet Users → Cloudflare Edge → [Whitelist] → Your Server:443
+                     ↑                ↑
+              (See Cloudflare IP)  (Only Cloudflare IPs allowed)
+```
+
+#### Benefits
+- ✅ **Enhanced Security**: Only Cloudflare can connect to port 443 externally
+- ✅ **DDoS Protection**: Blocks direct attacks to your server
+- ✅ **Maintains Proxy**: Full Cloudflare functionality preserved
+- ✅ **Internal Access Preserved**: Local network access maintained
+- ✅ **SSH Safe**: SSH access (port 22) is never affected
+- ✅ **Easy Management**: Enable/disable with one command
+- ✅ **Automatic Backup**: UFW rules backed up before changes
+
+#### Access After Enabling Whitelist
+**External Access (Internet):**
+- ✅ `https://your.domain.com` (via Cloudflare proxy)
+- ❌ Direct IP access blocked from internet
+
+**Internal Access (Local Network):**
+- ✅ `https://localhost` (from the server itself)
+- ✅ `https://192.168.x.x` (from local network)
+- ✅ `https://10.x.x.x` (from private networks)
+- ✅ SSH access always works (port 22 unaffected)
+
+#### Important Notes
+- Cloudflare occasionally updates their IP ranges
+- Run "Update Cloudflare IP list" monthly for best security
+- Backup files stored in `~/n8n/ufw_backup_*.txt`
+- IPv6 rules added only if IPv6 is enabled on your system
+- **Backup includes whitelist settings** for complete restoration
 
 ### Enhanced DNS Record Management
 

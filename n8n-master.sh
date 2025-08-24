@@ -241,13 +241,13 @@ create_backup() {
         tar -czf "$TEMP_DIR/n8n_data_${timestamp}.tar.gz" -T /dev/null
     fi
     
-    # Backup configs
+    # Backup configs including Cloudflare IP lists
     log_info "Backing up configuration files..."
     tar -czf "$TEMP_DIR/config_${timestamp}.tar.gz" \
-        docker-compose.yml nginx.conf .env certs/ 2>/dev/null || {
+        docker-compose.yml nginx.conf .env certs/ .cloudflare_ips_v4 .cloudflare_ips_v6 2>/dev/null || {
         log_warn "Some config files missing, backing up available files"
         tar -czf "$TEMP_DIR/config_${timestamp}.tar.gz" --ignore-failed-read \
-            docker-compose.yml nginx.conf .env certs/ 2>/dev/null || true
+            docker-compose.yml nginx.conf .env certs/ .cloudflare_ips_v4 .cloudflare_ips_v6 2>/dev/null || true
     }
     
     # Backup DNS provider credentials
@@ -735,6 +735,12 @@ restore_backup() {
             log_success "Restored SSL certificates"
         else
             log_warn "No certificates found in backup"
+        fi
+        
+        # Restore Cloudflare IP lists if present
+        if [ -f ".cloudflare_ips_v4" ] || [ -f ".cloudflare_ips_v6" ]; then
+            cp .cloudflare_ips_v* "$N8N_DIR/" 2>/dev/null || true
+            log_success "Restored Cloudflare IP lists"
         fi
         
         cd "$N8N_DIR"
@@ -2503,10 +2509,11 @@ security_settings_menu() {
         printf "10) Configure Automated Updates\n"
         printf "\n${BOLD}Production Security:${NC}\n"
         printf "11) Configure Cloudflare Protection\n"
-        printf "12) Run Security Audit\n"
-        printf "13) Configure Security Monitoring\n"
+        printf "12) Cloudflare IP Whitelist Management\n"
+        printf "13) Run Security Audit\n"
+        printf "14) Configure Security Monitoring\n"
         printf "\n${BOLD}Quick Actions:${NC}\n"
-        printf "14) Apply All Security Hardening\n"
+        printf "15) Apply All Security Hardening\n"
         printf "\n0) Back to Management Menu\n\n"
         printf "Select option: "
         read sec_choice
@@ -2565,12 +2572,15 @@ security_settings_menu() {
                 configure_cloudflare_protection
                 ;;
             12)
-                run_security_audit
+                cloudflare_ip_whitelist_menu
                 ;;
             13)
-                configure_security_monitoring
+                run_security_audit
                 ;;
             14)
+                configure_security_monitoring
+                ;;
+            15)
                 printf "\n${YELLOW}Applying all security hardening measures...${NC}\n"
                 configure_firewall
                 configure_fail2ban
@@ -3164,6 +3174,349 @@ EOF
     log_function_end "configure_cloudflare_protection"
     printf "Press Enter to continue..."
     read
+}
+
+# Whitelist Cloudflare IPs in UFW
+whitelist_cloudflare_ips() {
+    log_function_start "whitelist_cloudflare_ips"
+    
+    printf "\n${BLUE}Cloudflare IP Whitelist Configuration${NC}\n"
+    printf "=====================================\n\n"
+    
+    # Check if UFW is installed and enabled
+    if ! command -v ufw &> /dev/null; then
+        log_error "UFW is not installed. Please install UFW first."
+        printf "Run: sudo apt-get install ufw\n"
+        sleep 3
+        return 1
+    fi
+    
+    # Check current status
+    if sudo ufw status | grep -q "443.*ALLOW.*Anywhere" && ! sudo ufw status | grep -q "Cloudflare"; then
+        printf "${YELLOW}Warning: Port 443 is currently open to all IPs${NC}\n"
+        printf "This will be restricted to Cloudflare IPs only.\n\n"
+    fi
+    
+    # Detect SSH connection source if possible
+    local ssh_client_ip=""
+    if [ -n "$SSH_CLIENT" ]; then
+        ssh_client_ip=$(echo "$SSH_CLIENT" | awk '{print $1}')
+        log_debug "Detected SSH connection from: $ssh_client_ip"
+    fi
+    
+    printf "This will:\n"
+    printf "• Fetch current Cloudflare IP ranges\n"
+    printf "• Remove existing port 443 rules\n"
+    printf "• Add rules allowing only Cloudflare IPs to port 443\n"
+    printf "• Preserve internal network access (localhost, private IPs)\n"
+    if [ -n "$ssh_client_ip" ]; then
+        printf "• Preserve SSH access for your connection (%s)\n" "$ssh_client_ip"
+    fi
+    printf "• Keep all other firewall rules intact\n\n"
+    
+    printf "${CYAN}Note:${NC} SSH (port 22) access is never affected by this change.\n"
+    printf "${CYAN}Note:${NC} Internal network HTTPS access is preserved for management.\n\n"
+    
+    printf "Continue? (y/n): "
+    read confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        log_info "Cloudflare IP whitelist cancelled"
+        return 0
+    fi
+    
+    # Backup current UFW rules
+    log_info "Backing up current firewall rules..."
+    sudo ufw status numbered > "$N8N_DIR/ufw_backup_$(date +%Y%m%d_%H%M%S).txt"
+    
+    # Fetch Cloudflare IP ranges
+    printf "\nFetching Cloudflare IP ranges...\n"
+    local cf_ipv4_url="https://www.cloudflare.com/ips-v4"
+    local cf_ipv6_url="https://www.cloudflare.com/ips-v6"
+    
+    # Download IP lists
+    local ipv4_list=$(curl -s --max-time 10 "$cf_ipv4_url")
+    local ipv6_list=$(curl -s --max-time 10 "$cf_ipv6_url")
+    
+    if [ -z "$ipv4_list" ]; then
+        log_error "Failed to fetch Cloudflare IPv4 addresses"
+        return 1
+    fi
+    
+    # Save IP lists for reference
+    echo "$ipv4_list" > "$N8N_DIR/.cloudflare_ips_v4"
+    echo "$ipv6_list" > "$N8N_DIR/.cloudflare_ips_v6"
+    
+    # Count IPs
+    local ipv4_count=$(echo "$ipv4_list" | wc -l)
+    local ipv6_count=$(echo "$ipv6_list" | wc -l)
+    printf "Found ${GREEN}%d${NC} IPv4 ranges and ${GREEN}%d${NC} IPv6 ranges\n\n" "$ipv4_count" "$ipv6_count"
+    
+    # Remove existing port 443 rules (both generic and Cloudflare-specific)
+    printf "Removing existing port 443 rules...\n"
+    while sudo ufw status numbered | grep -q "443/tcp"; do
+        local rule_num=$(sudo ufw status numbered | grep "443/tcp" | head -1 | sed 's/\[\([0-9]*\)\].*/\1/')
+        if [ -n "$rule_num" ]; then
+            sudo ufw --force delete "$rule_num" 2>/dev/null || true
+        else
+            break
+        fi
+    done
+    
+    # Add internal network access first (preserve local access)
+    printf "Adding internal network access rules...\n"
+    sudo ufw allow from 127.0.0.0/8 to any port 443 proto tcp comment "Internal localhost" 2>/dev/null
+    sudo ufw allow from 10.0.0.0/8 to any port 443 proto tcp comment "Internal private 10.x" 2>/dev/null
+    sudo ufw allow from 172.16.0.0/12 to any port 443 proto tcp comment "Internal private 172.x" 2>/dev/null
+    sudo ufw allow from 192.168.0.0/16 to any port 443 proto tcp comment "Internal private 192.168.x" 2>/dev/null
+    printf " ${GREEN}✓${NC} (Internal networks preserved)\n"
+    
+    # Add Cloudflare IPv4 rules
+    printf "Adding Cloudflare IPv4 rules...\n"
+    local added_count=0
+    while IFS= read -r ip; do
+        if [ -n "$ip" ]; then
+            sudo ufw allow from "$ip" to any port 443 proto tcp comment "Cloudflare IPv4" 2>/dev/null
+            ((added_count++))
+            printf "."
+        fi
+    done <<< "$ipv4_list"
+    printf " ${GREEN}✓${NC} (%d rules)\n" "$added_count"
+    
+    # Add Cloudflare IPv6 rules if IPv6 is enabled
+    if [ "$ipv6_count" -gt 0 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]; then
+        printf "Adding Cloudflare IPv6 rules...\n"
+        added_count=0
+        while IFS= read -r ip; do
+            if [ -n "$ip" ]; then
+                sudo ufw allow from "$ip" to any port 443 proto tcp comment "Cloudflare IPv6" 2>/dev/null
+                ((added_count++))
+                printf "."
+            fi
+        done <<< "$ipv6_list"
+        printf " ${GREEN}✓${NC} (%d rules)\n" "$added_count"
+    fi
+    
+    # Reload UFW
+    printf "\nReloading firewall...\n"
+    sudo ufw reload
+    
+    # Save whitelist status
+    if ! grep -q "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env"; then
+        echo "CLOUDFLARE_IP_WHITELIST=enabled" >> "$N8N_DIR/.env"
+    else
+        sed -i "s/^CLOUDFLARE_IP_WHITELIST=.*/CLOUDFLARE_IP_WHITELIST=enabled/" "$N8N_DIR/.env"
+    fi
+    
+    if ! grep -q "^CLOUDFLARE_IP_WHITELIST_DATE=" "$N8N_DIR/.env"; then
+        echo "CLOUDFLARE_IP_WHITELIST_DATE=$(date +%Y-%m-%d)" >> "$N8N_DIR/.env"
+    else
+        sed -i "s/^CLOUDFLARE_IP_WHITELIST_DATE=.*/CLOUDFLARE_IP_WHITELIST_DATE=$(date +%Y-%m-%d)/" "$N8N_DIR/.env"
+    fi
+    
+    printf "\n${GREEN}Cloudflare IP whitelist enabled successfully!${NC}\n\n"
+    printf "Port 443 is now restricted to Cloudflare IPs only.\n"
+    printf "Your server is protected while maintaining Cloudflare proxy access.\n"
+    printf "\n${CYAN}Access Methods:${NC}\n"
+    printf "• External: https://your.domain.com (via Cloudflare)\n"
+    printf "• Internal: https://localhost or https://LAN_IP (direct access)\n"
+    printf "• SSH: Port 22 remains unaffected\n"
+    printf "\n${YELLOW}Recovery:${NC} If locked out, disable with option 2 in this menu.\n"
+    
+    printf "\nPress Enter to continue..."
+    read
+    
+    log_function_end "whitelist_cloudflare_ips"
+}
+
+# Remove Cloudflare IP whitelist
+remove_cloudflare_whitelist() {
+    log_function_start "remove_cloudflare_whitelist"
+    
+    printf "\n${BLUE}Remove Cloudflare IP Whitelist${NC}\n"
+    printf "===============================\n\n"
+    
+    # Check if whitelist is active
+    if ! sudo ufw status | grep -q "Cloudflare"; then
+        printf "${YELLOW}No Cloudflare IP whitelist rules found.${NC}\n"
+        printf "\nPress Enter to continue..."
+        read
+        return 0
+    fi
+    
+    printf "This will:\n"
+    printf "• Remove all Cloudflare-specific firewall rules\n"
+    printf "• Open port 443 to all IPs (standard configuration)\n"
+    printf "• Keep all other firewall rules intact\n\n"
+    
+    printf "${YELLOW}Warning: Port 443 will be accessible from any IP address.${NC}\n\n"
+    
+    printf "Continue? (y/n): "
+    read confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        log_info "Removal cancelled"
+        return 0
+    fi
+    
+    # Backup current rules
+    log_info "Backing up current firewall rules..."
+    sudo ufw status numbered > "$N8N_DIR/ufw_backup_before_removal_$(date +%Y%m%d_%H%M%S).txt"
+    
+    # Remove Cloudflare-specific rules and internal network rules
+    printf "\nRemoving Cloudflare IP rules and internal network rules...\n"
+    local removed_count=0
+    
+    while sudo ufw status numbered | grep -qE "(Cloudflare|Internal)"; do
+        local rule_num=$(sudo ufw status numbered | grep -E "(Cloudflare|Internal)" | head -1 | sed 's/\[\([0-9]*\)\].*/\1/')
+        if [ -n "$rule_num" ]; then
+            sudo ufw --force delete "$rule_num" 2>/dev/null
+            ((removed_count++))
+            printf "."
+        else
+            break
+        fi
+    done
+    
+    printf " ${GREEN}✓${NC} (Removed %d rules)\n" "$removed_count"
+    
+    # Add standard port 443 rule
+    printf "Adding standard port 443 rule...\n"
+    sudo ufw allow 443/tcp comment "n8n HTTPS"
+    
+    # Reload UFW
+    printf "Reloading firewall...\n"
+    sudo ufw reload
+    
+    # Update status in .env
+    sed -i '/^CLOUDFLARE_IP_WHITELIST=/d' "$N8N_DIR/.env" 2>/dev/null || true
+    sed -i '/^CLOUDFLARE_IP_WHITELIST_DATE=/d' "$N8N_DIR/.env" 2>/dev/null || true
+    
+    printf "\n${GREEN}Cloudflare IP whitelist removed successfully!${NC}\n\n"
+    printf "Port 443 is now open to all IPs (standard configuration).\n"
+    printf "Consider re-enabling the whitelist for enhanced security.\n"
+    
+    printf "\nPress Enter to continue..."
+    read
+    
+    log_function_end "remove_cloudflare_whitelist"
+}
+
+# Update Cloudflare IP whitelist
+update_cloudflare_ips() {
+    log_function_start "update_cloudflare_ips"
+    
+    printf "\n${BLUE}Update Cloudflare IP List${NC}\n"
+    printf "=========================\n\n"
+    
+    # Check if whitelist is active
+    if ! sudo ufw status | grep -q "Cloudflare"; then
+        printf "${YELLOW}Cloudflare IP whitelist is not currently active.${NC}\n"
+        printf "Enable it first from the menu.\n"
+        printf "\nPress Enter to continue..."
+        read
+        return 0
+    fi
+    
+    printf "This will:\n"
+    printf "• Fetch the latest Cloudflare IP ranges\n"
+    printf "• Update firewall rules with any changes\n"
+    printf "• Maintain uninterrupted service\n\n"
+    
+    printf "Continue? (y/n): "
+    read confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        return 0
+    fi
+    
+    # Re-apply whitelist (this will fetch fresh IPs)
+    whitelist_cloudflare_ips
+    
+    log_function_end "update_cloudflare_ips"
+}
+
+# Show Cloudflare whitelist status
+show_cloudflare_whitelist_status() {
+    printf "\n${BLUE}Cloudflare IP Whitelist Status${NC}\n"
+    printf "===============================\n\n"
+    
+    # Check if whitelist is enabled
+    local whitelist_status=$(grep "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    local whitelist_date=$(grep "^CLOUDFLARE_IP_WHITELIST_DATE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    
+    if [ "$whitelist_status" = "enabled" ]; then
+        printf "Status: ${GREEN}ENABLED${NC}\n"
+        if [ -n "$whitelist_date" ]; then
+            printf "Last updated: %s\n" "$whitelist_date"
+        fi
+    else
+        printf "Status: ${YELLOW}DISABLED${NC}\n"
+    fi
+    
+    # Count Cloudflare rules in UFW
+    local cf_rule_count=$(sudo ufw status numbered | grep -c "Cloudflare" || echo "0")
+    printf "Active Cloudflare rules: ${CYAN}%d${NC}\n" "$cf_rule_count"
+    
+    # Check port 443 accessibility
+    printf "\nPort 443 Configuration:\n"
+    if sudo ufw status | grep -q "443.*ALLOW.*Anywhere" && ! sudo ufw status | grep -q "Cloudflare.*443"; then
+        printf "• ${YELLOW}Open to all IPs${NC} (standard configuration)\n"
+    elif [ "$cf_rule_count" -gt 0 ]; then
+        printf "• ${GREEN}Restricted to Cloudflare IPs only${NC}\n"
+        
+        # Show IP list files
+        if [ -f "$N8N_DIR/.cloudflare_ips_v4" ]; then
+            local ipv4_count=$(wc -l < "$N8N_DIR/.cloudflare_ips_v4")
+            printf "• IPv4 ranges: %d\n" "$ipv4_count"
+        fi
+        if [ -f "$N8N_DIR/.cloudflare_ips_v6" ]; then
+            local ipv6_count=$(wc -l < "$N8N_DIR/.cloudflare_ips_v6")
+            printf "• IPv6 ranges: %d\n" "$ipv6_count"
+        fi
+    else
+        printf "• ${RED}No rules found${NC}\n"
+    fi
+    
+    # Test connectivity suggestion
+    printf "\n${CYAN}Test Commands:${NC}\n"
+    printf "• Check DNS: dig +short your.domain.com\n"
+    printf "• Verify proxy: curl -I https://your.domain.com\n"
+    printf "• UFW details: sudo ufw status numbered | grep 443\n"
+    
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# Cloudflare IP whitelist menu
+cloudflare_ip_whitelist_menu() {
+    while true; do
+        print_header
+        printf "${BLUE}Cloudflare IP Whitelist Management${NC}\n"
+        printf "===================================\n\n"
+        
+        # Show current status
+        local whitelist_status=$(grep "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+        if [ "$whitelist_status" = "enabled" ]; then
+            printf "Current Status: ${GREEN}Whitelist Enabled${NC}\n\n"
+        else
+            printf "Current Status: ${YELLOW}Whitelist Disabled${NC}\n\n"
+        fi
+        
+        printf "1) Enable Cloudflare IP whitelist (restrict port 443)\n"
+        printf "2) Remove Cloudflare IP whitelist (open port 443)\n"
+        printf "3) Update Cloudflare IP list\n"
+        printf "4) Show whitelist status\n"
+        printf "0) Back to Security Menu\n\n"
+        
+        read -p "Select option: " choice
+        
+        case $choice in
+            1) whitelist_cloudflare_ips ;;
+            2) remove_cloudflare_whitelist ;;
+            3) update_cloudflare_ips ;;
+            4) show_cloudflare_whitelist_status ;;
+            0) return ;;
+            *) log_error "Invalid option" ;;
+        esac
+    done
 }
 
 # Run Security Audit

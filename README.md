@@ -2,26 +2,6 @@
 
 A comprehensive master script for deploying, managing, and maintaining n8n with PostgreSQL, Nginx, and automated features. This all-in-one solution handles installation, updates, backups, uninstallation, and complete environment management with no external port exposure required.
 
-## 📋 Changelog
-
-### v2.3.1 (August 2025)
-- **Dual Certificate System**: Innovative architecture with Let's Encrypt and self-signed certificates coexisting
-- **Individual Certificate Renewal**: Renew Let's Encrypt, self-signed, or both certificates independently
-- **Enhanced Certificate Details**: Comprehensive view showing both certificate types with expiration dates
-- **Complete Coverage**: Self-signed certificates now include external domain for universal access
-- **Smart Nginx Configuration**: Dynamic server blocks based on available certificate types
-- **Certificate File Structure**: Dedicated files (`n8n-letsencrypt.crt`, `n8n-selfsigned.crt`) with active certificate linking
-
-### v2.3.0 (January 2025)
-- **End-to-End HTTPS**: Implemented full HTTPS encryption between nginx and n8n containers
-- **Enterprise Security**: Added N8N_SSL_KEY and N8N_SSL_CERT environment variables for internal TLS
-- **Enterprise Certificate Validation**: Health checks now validate SSL certificates without bypassing security
-- **Universal Health Check**: Adapts to Let's Encrypt or self-signed certificates automatically
-- **Enterprise Backup Validation**: Post-restore security verification with certificate validation
-- **Cloudflare Fix**: Resolved compatibility issues with "Always Use HTTPS" and "Automatic HTTPS Rewrites"
-- **Zero-Trust Architecture**: All internal communication now encrypted with SSL/TLS
-- **Improved Status Detection**: Fixed misleading Cloudflare whitelist warning messages
-
 ## 🚀 Features
 
 ### Core Features
@@ -39,8 +19,10 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 - **Interactive Menus**: User-friendly command-line interface with built-in management functions
 - **Direct Commands**: Script automation support with command-line arguments
 
-### 🔒 Enhanced Security Features (v2.1.0+)
+### 🔒 Enhanced Security Features
+- **Dual Certificate System**: Innovative architecture with Let's Encrypt and self-signed certificates coexisting
 - **Let's Encrypt Support**: Toggle between self-signed and Let's Encrypt certificates with DNS-01 challenge
+- **Individual Certificate Renewal**: Renew Let's Encrypt, self-signed, or both certificates independently
 - **Firewall Protection**: UFW firewall with secure default rules (ports 22, 443 only)
 - **Rate Limiting**: Nginx-based rate limiting to prevent abuse and DDoS attacks
 - **Intrusion Prevention**: fail2ban configured for blocking malicious IPs
@@ -48,13 +30,13 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 - **Enhanced SSL/TLS**: Strong ciphers, TLS 1.2/1.3 only, security headers
 - **Security Hardening**: Automated application of all security best practices
 
-### 🌐 Production Internet-Facing Features (v2.1.0+)
+### 🌐 Production Internet-Facing Features
 - **Cloudflare Integration**: Automatic CDN/proxy setup with DDoS protection and bot management
 - **Security Auditing**: Built-in comprehensive security audit with actionable recommendations
 - **Advanced Monitoring**: Email, webhook, and log-based security monitoring and alerting
 - **Zero-Configuration Security**: One-click application of enterprise-grade security measures
 
-### 🏠 Dynamic IP & Home Server Features (v2.2.0)
+### 🏠 Dynamic IP & Home Server Features
 - **Smart DNS Management**: Automatic detection and preservation of CNAME records for dynamic IPs
 - **Synology DDoS Support**: Native support for synology.me, duckdns.org, no-ip.com services
 - **Closed Port Operation**: DNS-01 certificates + Cloudflare proxy = no open firewall ports needed
@@ -329,7 +311,7 @@ The script now uses a unified backup format for:
 - SSL certificates
 - Environment variables
 
-**Security Features (v2.1.0+):**
+**Security Features:**
 - DNS provider credentials (Cloudflare, AWS Route53, DigitalOcean, Google Cloud)
 - fail2ban configuration (jails, filters, IP whitelists)
 - UFW firewall rules and configuration
@@ -343,7 +325,7 @@ The script now uses a unified backup format for:
 - DNS provider credentials are restored with proper permissions
 - Let's Encrypt renewal automation continues seamlessly
 
-**Cross-Environment Compatibility (v2.1.0+):**
+**Cross-Environment Compatibility:**
 - **Hostname/IP Migration**: Automatic detection and adaptation to new network environments
 - **Certificate Intelligence**: Self-signed certificates regenerated with new IP addresses, Let's Encrypt certificates preserved
 - **Firewall Resilience**: Enhanced error handling for UFW rule compatibility across different systems
@@ -382,9 +364,9 @@ less ~/n8n-operations.log
 
 ### Log Format
 ```
-[2024-12-20 15:30:45] [INFO] n8n Master Script v2.0.0 started
-[2024-12-20 15:31:12] [SUCCESS] Backup created: backups/full_backup_20241220_153112.tar.gz
-[2024-12-20 15:32:05] [INFO] Environment variable OPENAI_API_KEY added successfully
+[INFO] n8n Master Script started
+[SUCCESS] Backup created: backups/full_backup_20240824_153112.tar.gz
+[INFO] Environment variable OPENAI_API_KEY added successfully
 ```
 
 ## 🗑️ Uninstallation
@@ -685,7 +667,7 @@ ls -la ~/n8n/.*.ini ~/n8n/.google-cloud.json ~/.aws/credentials 2>/dev/null
 ./n8n-master.sh → 1) Manage n8n → 2) View Logs → 2) PostgreSQL
 ```
 
-### Security Audit Accuracy (Enhanced in v2.2.0)
+### Security Audit Accuracy
 The security audit now provides accurate validation with fixed pattern matching:
 ```bash
 # Previously might show false warnings, now shows accurate status:
@@ -819,45 +801,6 @@ Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Closed ports, ✅ Auto-updates
 - Recommends optimal security enhancements
 - Never forces changes to working configurations
 
-## 🆕 Recent Improvements
-
-### Version 2.3.1 - Dual Certificate System
-- **Dual Certificate Architecture**: Revolutionary system supporting both Let's Encrypt and self-signed certificates simultaneously
-- **Individual Certificate Management**: Independent renewal options for each certificate type
-- **Universal Access Coverage**: Self-signed certificates enhanced with external domain inclusion
-- **Smart Certificate Routing**: Nginx dynamically serves appropriate certificates based on access method
-- **Enhanced Certificate Details Display**: Comprehensive view of both certificate systems with expiration tracking
-- **Environment Variable Tracking**: New variables (LETSENCRYPT_ENABLED, CERTIFICATE_TYPE) for system state management
-- **Backup System Enhancement**: Complete dual certificate backup and restoration support
-
-### Version 2.2.0 - Enhanced DNS & Dynamic IP Support
-- **Smart DNS Management**: Intelligent CNAME vs A record detection and recommendations
-- **Dynamic IP Support**: Native support for Synology DDoS, Duck DNS, No-IP services  
-- **Enhanced Cloudflare Integration**: Automatic DNS record creation with proxy enablement
-- **Cloudflare IP Whitelist**: Restrict port 443 to only Cloudflare IPs for enhanced security
-- **DNS-01 Benefits**: No port requirements for SSL certificates (perfect for closed firewalls)
-- **Cross-System Migration**: Enhanced backup/restore with hostname/IP adaptation
-- **Installation-Time Restore**: Complete dependency installation during backup restore
-- **Corrected Documentation**: Accurate port requirements for Cloudflare proxy configurations
-
-### Version 2.1.0 - Security Enhancements  
-- **Let's Encrypt Integration**: Support for free SSL certificates with DNS-01 challenge
-- **Firewall Management**: Automated UFW configuration with secure defaults
-- **Rate Limiting**: Comprehensive rate limiting to prevent abuse
-- **Intrusion Prevention**: fail2ban integration with automatic IP blocking
-- **Automatic Updates**: Configurable security and application updates
-- **Security Hardening**: One-click application of all security best practices
-- **Enhanced Monitoring**: Security status in health checks and logs
-
-### Version 2.0.0 - Core Improvements
-- **Unified Architecture**: Single master script with all functions built-in
-- **Enhanced SSL Certificates**: Multiple IP address support with SAN extensions
-- **Comprehensive Logging**: All operations logged with timestamps
-- **Automatic Service Recreation**: Environment variable management with prompts
-- **Backup Unification**: Consistent backup format across all operations
-- **Enhanced Error Handling**: Better error messages and recovery suggestions
-- **Deprecation Compliance**: Latest n8n environment variables
-- **Docker Compose Integration**: Proper environment variable management
 
 ## 🤝 Contributing
 
@@ -1072,7 +1015,7 @@ Automatically configure Cloudflare for enterprise-grade protection:
 - Domain configured in Cloudflare (nameservers pointing to Cloudflare)
 - Cloudflare API token with Zone permissions
 
-### Cloudflare IP Whitelist Management (v2.2.0)
+### Cloudflare IP Whitelist Management
 
 Restrict port 443 access to only Cloudflare IP addresses for enhanced security while maintaining proxy functionality:
 
@@ -1206,7 +1149,7 @@ Run comprehensive security audits with actionable recommendations:
 - ✅ Configuration security (default passwords, encryption keys)
 - ✅ Network port exposure analysis
 
-**Enhanced Cloudflare Security Validation (v2.2.0):**
+**Enhanced Cloudflare Security Validation:**
 - ✅ Cloudflare IP whitelist status and rule validation
 - ✅ Internal network access verification (localhost, private IPs)
 - ✅ IPv4 and IPv6 Cloudflare rule counting accuracy
@@ -1272,7 +1215,5 @@ This script now includes **enterprise-grade security features** suitable for pro
 
 ---
 
-**Version**: 2.3.0  
-**Last Updated**: January 2025  
 **Tested On**: Ubuntu 22.04/24.04 LTS, Debian 11/12  
 **Security Level**: Enterprise-Grade with End-to-End HTTPS Encryption

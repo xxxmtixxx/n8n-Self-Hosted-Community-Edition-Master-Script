@@ -3054,33 +3054,33 @@ security_settings_menu() {
                 printf "\nPress Enter to continue..."
                 read
                 ;;
-            7)
+            9)
                 firewall_status
                 ;;
-            8)
+            10)
                 configure_fail2ban
                 printf "\nPress Enter to continue..."
                 read
                 ;;
-            9)
+            11)
                 fail2ban_status
                 ;;
-            10)
+            12)
                 configure_auto_updates
                 ;;
-            11)
+            13)
                 configure_cloudflare_protection
                 ;;
-            12)
+            14)
                 cloudflare_ip_whitelist_menu
                 ;;
-            13)
+            15)
                 run_security_audit
                 ;;
-            14)
+            16)
                 configure_security_monitoring
                 ;;
-            15)
+            17)
                 printf "\n${YELLOW}Applying all security hardening measures...${NC}\n"
                 configure_firewall
                 configure_fail2ban

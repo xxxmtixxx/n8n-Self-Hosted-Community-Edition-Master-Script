@@ -8,7 +8,7 @@ set -euo pipefail
 N8N_DIR="${N8N_DIR:-$HOME/n8n}"
 GLOBAL_BACKUP_DIR="${GLOBAL_BACKUP_DIR:-$HOME/n8n-backups}"
 COMPOSE_PROJECT_NAME="n8n"
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 LOG_FILE="$HOME/n8n-operations.log"
 
 # Colors - Using printf for better compatibility
@@ -681,8 +681,8 @@ show_management_menu() {
         printf "7) Update n8n\n"
         printf "8) Health Check\n"
         printf "9) Show Version\n"
-        printf "10) Renew SSL Certificate\n"
-        printf "11) Manage Environment Variables\n"
+        printf "10) Manage Environment Variables\n"
+        printf "11) Security & SSL Settings\n"
         printf "0) Back to Main Menu\n\n"
         printf "Select option: "
         
@@ -698,8 +698,8 @@ show_management_menu() {
             7) update_n8n ;;
             8) health_check ;;
             9) show_version ;;
-            10) renew_certificate ;;
-            11) manage_env_vars ;;
+            10) manage_env_vars ;;
+            11) security_settings_menu ;;
             0) return ;;
             *) printf "${RED}Invalid option${NC}\n"; sleep 1 ;;
         esac
@@ -831,24 +831,1389 @@ show_version() {
     else
         echo "not running"
     fi
+    printf "\nPress Enter to continue..."
+    read
 }
 
 # Renew certificate
 renew_certificate() {
-    log_info "Renewing SSL certificate with enhanced features..."
+    log_info "Renewing SSL certificate..."
     cd "$N8N_DIR"
     
-    # Generate new certificate with enhanced features (IP addresses + SAN)
-    generate_ssl_certificate "$N8N_DIR/certs" certs/n8n.key.new certs/n8n.crt.new
+    # Check certificate type from .env
+    local cert_type=$(grep "^CERTIFICATE_TYPE=" .env 2>/dev/null | cut -d'=' -f2 || echo "self-signed")
     
-    mv certs/n8n.key certs/n8n.key.old
-    mv certs/n8n.crt certs/n8n.crt.old
-    mv certs/n8n.key.new certs/n8n.key
-    mv certs/n8n.crt.new certs/n8n.crt
-    
-    docker compose restart nginx
-    printf "${GREEN}Certificate renewed for another 10 years${NC}\n"
+    if [ "$cert_type" = "letsencrypt" ]; then
+        renew_letsencrypt_certificate
+    else
+        # Generate new self-signed certificate with enhanced features (IP addresses + SAN)
+        generate_ssl_certificate "$N8N_DIR/certs" certs/n8n.key.new certs/n8n.crt.new
+        
+        mv certs/n8n.key certs/n8n.key.old
+        mv certs/n8n.crt certs/n8n.crt.old
+        mv certs/n8n.key.new certs/n8n.key
+        mv certs/n8n.crt.new certs/n8n.crt
+        
+        docker compose restart nginx
+        printf "${GREEN}Self-signed certificate renewed for another 10 years${NC}\n"
+    fi
     sleep 2
+}
+
+# Configure firewall rules
+configure_firewall() {
+    log_function_start "configure_firewall"
+    log_info "Configuring firewall rules..."
+    
+    # Check if UFW is installed
+    if ! command -v ufw &> /dev/null; then
+        log_info "Installing UFW (Uncomplicated Firewall)..."
+        sudo apt-get update && sudo apt-get install -y ufw
+    fi
+    
+    # Configure UFW rules
+    log_info "Setting up firewall rules..."
+    
+    # Default policies
+    sudo ufw default deny incoming || log_warn "Could not set default deny incoming"
+    sudo ufw default allow outgoing || log_warn "Could not set default allow outgoing"
+    
+    # Allow SSH (port 22)
+    sudo ufw allow 22/tcp comment 'SSH' || log_warn "Could not add SSH rule"
+    
+    # Allow HTTPS (port 443) for n8n
+    sudo ufw allow 443/tcp comment 'n8n HTTPS' || log_warn "Could not add HTTPS rule"
+    
+    # Note: UFW automatically handles established/related connections with stateful firewall
+    # No need for explicit 'established' rule
+    
+    # Enable UFW if not already enabled
+    if sudo ufw status | grep -q "Status: inactive"; then
+        log_info "Enabling firewall..."
+        sudo ufw --force enable
+        log_success "Firewall enabled with secure rules"
+    else
+        log_info "Firewall already active, rules updated"
+        sudo ufw reload
+    fi
+    
+    log_function_end "configure_firewall"
+}
+
+# Firewall status
+firewall_status() {
+    printf "\n${BLUE}Firewall Status:${NC}\n"
+    printf "==================\n"
+    
+    if command -v ufw &> /dev/null; then
+        sudo ufw status verbose
+    else
+        printf "${YELLOW}UFW is not installed${NC}\n"
+    fi
+    
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# Configure fail2ban
+configure_fail2ban() {
+    log_function_start "configure_fail2ban"
+    log_info "Configuring fail2ban for intrusion prevention..."
+    
+    # Install fail2ban if not present
+    if ! command -v fail2ban-client &> /dev/null; then
+        log_info "Installing fail2ban..."
+        sudo apt-get update && sudo apt-get install -y fail2ban
+    fi
+    
+    # Create n8n jail configuration
+    log_info "Creating fail2ban jail for n8n..."
+    sudo tee /etc/fail2ban/jail.d/n8n.conf > /dev/null << 'EOF'
+[n8n-auth]
+enabled = true
+port = 443
+protocol = tcp
+filter = n8n-auth
+logpath = $N8N_DIR/logs/access.log
+maxretry = 5
+findtime = 600
+bantime = 3600
+
+[nginx-limit-req]
+enabled = true
+port = 443
+protocol = tcp
+filter = nginx-limit-req
+logpath = $N8N_DIR/logs/error.log
+maxretry = 10
+findtime = 60
+bantime = 600
+EOF
+
+    # Create n8n filter
+    sudo tee /etc/fail2ban/filter.d/n8n-auth.conf > /dev/null << 'EOF'
+[Definition]
+failregex = ^<HOST> .* "(GET|POST) .*/rest/login.*" 401 .*$
+            ^<HOST> .* "(GET|POST) .*/api/.*" 401 .*$
+ignoreregex =
+EOF
+
+    # Restart fail2ban
+    sudo systemctl restart fail2ban
+    sudo systemctl enable fail2ban
+    
+    log_success "fail2ban configured for n8n protection"
+    log_function_end "configure_fail2ban"
+}
+
+# Validate IP address format
+validate_ip() {
+    local ip="$1"
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        IFS='.' read -ra ADDR <<< "$ip"
+        for i in "${ADDR[@]}"; do
+            if [[ $i -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Unban IP address
+unban_ip() {
+    printf "\n${BLUE}Unban IP Address${NC}\n"
+    printf "=================\n\n"
+    
+    # Show currently banned IPs first
+    printf "Currently banned IPs:\n"
+    printf "----------------------\n"
+    local jails=($(sudo fail2ban-client status | grep "Jail list" | cut -d: -f2 | tr -d ' \t' | tr ',' ' '))
+    local found_banned=false
+    
+    for jail in "${jails[@]}"; do
+        local banned_ips=$(sudo fail2ban-client status "$jail" | grep "Banned IP list" | cut -d: -f2 | xargs)
+        if [ -n "$banned_ips" ] && [ "$banned_ips" != "" ]; then
+            printf "%s: %s\n" "$jail" "$banned_ips"
+            found_banned=true
+        fi
+    done
+    
+    if [ "$found_banned" = false ]; then
+        printf "No IPs currently banned\n"
+        printf "\nPress Enter to continue..."
+        read
+        return 0
+    fi
+    
+    printf "\nEnter IP address to unban: "
+    read ip_to_unban
+    
+    # Validate IP format
+    if ! validate_ip "$ip_to_unban"; then
+        log_error "Invalid IP address format: $ip_to_unban"
+        sleep 2
+        return 1
+    fi
+    
+    printf "\nUnban options:\n"
+    printf "1) Unban from ALL jails\n"
+    printf "2) Select specific jail\n"
+    printf "0) Cancel\n\n"
+    printf "Select option: "
+    read unban_choice
+    
+    case $unban_choice in
+        1)
+            log_info "Unbanning $ip_to_unban from ALL jails..."
+            sudo fail2ban-client unban "$ip_to_unban"
+            if [ $? -eq 0 ]; then
+                log_success "IP $ip_to_unban unbanned from all jails"
+            else
+                log_error "Failed to unban IP $ip_to_unban"
+            fi
+            ;;
+        2)
+            printf "\nSelect jail to unban from:\n"
+            local jail_count=1
+            for jail in "${jails[@]}"; do
+                printf "%d) %s\n" "$jail_count" "$jail"
+                ((jail_count++))
+            done
+            printf "0) Cancel\n\n"
+            printf "Select jail: "
+            read jail_choice
+            
+            if [[ "$jail_choice" =~ ^[0-9]+$ ]] && [ "$jail_choice" -gt 0 ] && [ "$jail_choice" -le ${#jails[@]} ]; then
+                local selected_jail="${jails[$((jail_choice-1))]}"
+                log_info "Unbanning $ip_to_unban from $selected_jail jail..."
+                sudo fail2ban-client set "$selected_jail" unbanip "$ip_to_unban"
+                if [ $? -eq 0 ]; then
+                    log_success "IP $ip_to_unban unbanned from $selected_jail jail"
+                else
+                    log_error "Failed to unban IP $ip_to_unban from $selected_jail"
+                fi
+            else
+                log_info "Operation cancelled"
+            fi
+            ;;
+        0)
+            log_info "Operation cancelled"
+            ;;
+        *)
+            log_error "Invalid option"
+            ;;
+    esac
+    
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# Add IP to whitelist (ignore list)
+add_to_whitelist() {
+    printf "\n${BLUE}Add IP to Whitelist${NC}\n"
+    printf "====================\n\n"
+    
+    printf "Enter IP address to whitelist: "
+    read ip_to_whitelist
+    
+    # Validate IP format
+    if ! validate_ip "$ip_to_whitelist"; then
+        log_error "Invalid IP address format: $ip_to_whitelist"
+        sleep 2
+        return 1
+    fi
+    
+    printf "Enter description (optional): "
+    read description
+    
+    # Add to fail2ban default ignore list
+    local ignore_file="/etc/fail2ban/jail.local"
+    
+    # Create jail.local if it doesn't exist
+    if [ ! -f "$ignore_file" ]; then
+        sudo tee "$ignore_file" > /dev/null << 'EOF'
+[DEFAULT]
+# Whitelisted IPs added by n8n-master script
+ignoreip = 127.0.0.1/8 ::1
+EOF
+    fi
+    
+    # Check if IP is already whitelisted
+    if sudo grep -q "$ip_to_whitelist" "$ignore_file"; then
+        log_warn "IP $ip_to_whitelist is already whitelisted"
+        sleep 2
+        return 0
+    fi
+    
+    # Add IP to ignore list
+    log_info "Adding $ip_to_whitelist to whitelist..."
+    
+    # Create a backup
+    sudo cp "$ignore_file" "$ignore_file.backup.$(date +%Y%m%d_%H%M%S)"
+    
+    # Add the IP to the ignoreip line
+    if [ -n "$description" ]; then
+        sudo sed -i "/ignoreip = /s/$/ $ip_to_whitelist # $description/" "$ignore_file"
+    else
+        sudo sed -i "/ignoreip = /s/$/ $ip_to_whitelist/" "$ignore_file"
+    fi
+    
+    # Restart fail2ban to apply changes
+    sudo systemctl restart fail2ban
+    if [ $? -eq 0 ]; then
+        log_success "IP $ip_to_whitelist added to whitelist and fail2ban restarted"
+    else
+        log_error "Failed to restart fail2ban"
+    fi
+    
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# View whitelist
+view_whitelist() {
+    printf "\n${BLUE}Whitelisted IPs${NC}\n"
+    printf "===============\n\n"
+    
+    local ignore_file="/etc/fail2ban/jail.local"
+    
+    if [ -f "$ignore_file" ]; then
+        local ignore_line=$(sudo grep "^ignoreip" "$ignore_file" 2>/dev/null)
+        if [ -n "$ignore_line" ]; then
+            printf "Current whitelist:\n"
+            printf "%s\n" "$ignore_line"
+        else
+            printf "No custom whitelist found\n"
+        fi
+    else
+        printf "No whitelist configuration found\n"
+        printf "Default: 127.0.0.1/8 ::1 (localhost only)\n"
+    fi
+    
+    printf "\nPress Enter to continue..."
+    read
+}
+
+# fail2ban IP Management Menu
+manage_fail2ban_ips() {
+    while true; do
+        clear
+        printf "\n${BLUE}fail2ban IP Management${NC}\n"
+        printf "======================\n\n"
+        
+        printf "1) View All Banned IPs\n"
+        printf "2) Unban Specific IP\n"
+        printf "3) Add IP to Whitelist\n"
+        printf "4) View Whitelist\n"
+        printf "5) Unban All IPs from All Jails\n"
+        printf "0) Back to Security Menu\n\n"
+        printf "Select option: "
+        read ip_choice
+        
+        case $ip_choice in
+            1)
+                printf "\n${BLUE}Currently Banned IPs${NC}\n"
+                printf "=====================\n\n"
+                local jails=($(sudo fail2ban-client status | grep "Jail list" | cut -d: -f2 | tr -d ' \t' | tr ',' ' '))
+                local found_any=false
+                
+                for jail in "${jails[@]}"; do
+                    local banned_count=$(sudo fail2ban-client status "$jail" | grep "Currently banned" | awk '{print $4}')
+                    local banned_ips=$(sudo fail2ban-client status "$jail" | grep "Banned IP list" | cut -d: -f2 | xargs)
+                    
+                    printf "%s jail:\n" "$jail"
+                    printf "  Currently banned: %s\n" "$banned_count"
+                    if [ -n "$banned_ips" ] && [ "$banned_ips" != "" ]; then
+                        printf "  IPs: %s\n" "$banned_ips"
+                        found_any=true
+                    else
+                        printf "  IPs: None\n"
+                    fi
+                    printf "\n"
+                done
+                
+                if [ "$found_any" = false ]; then
+                    printf "${GREEN}No IPs are currently banned${NC}\n"
+                fi
+                
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+            2)
+                unban_ip
+                ;;
+            3)
+                add_to_whitelist
+                ;;
+            4)
+                view_whitelist
+                ;;
+            5)
+                printf "\n${YELLOW}Unban ALL IPs from ALL jails?${NC}\n"
+                printf "This will remove all current bans.\n"
+                printf "Continue? (yes/no): "
+                read confirm_unban_all
+                
+                if [ "$confirm_unban_all" = "yes" ]; then
+                    log_info "Unbanning all IPs from all jails..."
+                    local jails=($(sudo fail2ban-client status | grep "Jail list" | cut -d: -f2 | tr -d ' \t' | tr ',' ' '))
+                    
+                    for jail in "${jails[@]}"; do
+                        sudo fail2ban-client unban --all "$jail" 2>/dev/null || true
+                    done
+                    
+                    log_success "All IPs unbanned from all jails"
+                else
+                    log_info "Operation cancelled"
+                fi
+                
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+            0)
+                return
+                ;;
+            *)
+                log_error "Invalid option"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# fail2ban status
+fail2ban_status() {
+    printf "\n${BLUE}fail2ban Status:${NC}\n"
+    printf "==================\n"
+    
+    if command -v fail2ban-client &> /dev/null; then
+        printf "\nOverall Status:\n"
+        sudo fail2ban-client status
+        
+        printf "\nn8n Jail Status:\n"
+        sudo fail2ban-client status n8n-auth 2>/dev/null || printf "n8n jail not configured\n"
+        
+        printf "\nNginx Rate Limit Jail Status:\n"
+        sudo fail2ban-client status nginx-limit-req 2>/dev/null || printf "Nginx jail not configured\n"
+        
+        printf "\nSSH Jail Status:\n"
+        sudo fail2ban-client status sshd 2>/dev/null || printf "SSH jail not configured\n"
+        
+        printf "\n${CYAN}Options:${NC}\n"
+        printf "1) Manage Banned IPs\n"
+        printf "2) Back to Security Menu\n\n"
+        printf "Select option: "
+        read status_choice
+        
+        case $status_choice in
+            1)
+                manage_fail2ban_ips
+                ;;
+            2)
+                return
+                ;;
+            *)
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+        esac
+    else
+        printf "${YELLOW}fail2ban is not installed${NC}\n"
+        printf "\nPress Enter to continue..."
+        read
+    fi
+}
+
+# Setup Let's Encrypt with DNS-01 challenge
+setup_letsencrypt() {
+    log_function_start "setup_letsencrypt"
+    
+    printf "\n${BLUE}Let's Encrypt Setup with DNS-01 Challenge${NC}\n"
+    printf "==========================================\n\n"
+    
+    # Check if certbot is installed
+    if ! command -v certbot &> /dev/null; then
+        log_info "Installing certbot and DNS plugins..."
+        sudo apt-get update
+        sudo apt-get install -y certbot \
+            python3-certbot-dns-cloudflare \
+            python3-certbot-dns-route53 \
+            python3-certbot-dns-digitalocean \
+            python3-certbot-dns-google
+    fi
+    
+    printf "Select your DNS provider:\n"
+    printf "1) Cloudflare (API - Automated)\n"
+    printf "2) AWS Route53 (API - Automated)\n"
+    printf "3) DigitalOcean (API - Automated)\n"
+    printf "4) Google Cloud DNS (API - Automated)\n"
+    printf "5) Manual DNS (Any provider - GoDaddy, Namecheap, etc.)\n"
+    printf "0) Cancel\n\n"
+    printf "Select option: "
+    read dns_provider
+    
+    case $dns_provider in
+        1)
+            setup_letsencrypt_cloudflare
+            ;;
+        2)
+            setup_letsencrypt_route53
+            ;;
+        3)
+            setup_letsencrypt_digitalocean
+            ;;
+        4)
+            setup_letsencrypt_google
+            ;;
+        5)
+            setup_letsencrypt_manual
+            ;;
+        0)
+            return
+            ;;
+        *)
+            log_error "Invalid option"
+            sleep 1
+            ;;
+    esac
+    
+    log_function_end "setup_letsencrypt"
+}
+
+# Validate Cloudflare API token
+validate_cloudflare_token() {
+    local token="$1"
+    local domain="$2"
+    
+    # Extract base domain (e.g., example.com from sub.example.com)
+    local base_domain=$(echo "$domain" | awk -F'.' '{print $(NF-1)"."$NF}')
+    
+    log_info "Validating Cloudflare API token..."
+    
+    # Test token validity
+    local response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json")
+    
+    if echo "$response" | grep -q '"success":true'; then
+        log_success "Token is valid"
+        
+        # Check if we can access the zone
+        local zone_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$base_domain" \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json")
+        
+        if echo "$zone_response" | grep -q '"success":true' && echo "$zone_response" | grep -q "$base_domain"; then
+            log_success "Token has access to domain: $base_domain"
+            return 0
+        else
+            log_error "Token does not have access to domain: $base_domain"
+            log_info "Make sure the token has 'Zone:DNS:Edit' permission for this domain"
+            return 1
+        fi
+    else
+        log_error "Invalid Cloudflare API token"
+        local error_msg=$(echo "$response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4)
+        if [ -n "$error_msg" ]; then
+            log_error "Error: $error_msg"
+        fi
+        return 1
+    fi
+}
+
+# Setup Let's Encrypt with Cloudflare
+setup_letsencrypt_cloudflare() {
+    printf "\n${BLUE}Cloudflare DNS Setup${NC}\n"
+    printf "=====================\n\n"
+    
+    printf "${YELLOW}Creating a Cloudflare API Token:${NC}\n"
+    printf "1. Go to: https://dash.cloudflare.com/profile/api-tokens\n"
+    printf "2. Click 'Create Token'\n"
+    printf "3. Use template: 'Edit zone DNS'\n"
+    printf "4. Configure permissions:\n"
+    printf "   - Zone Resources: Include → Specific zone → Your domain\n"
+    printf "   - Zone:DNS:Edit permission\n"
+    printf "5. Click 'Continue to summary' → 'Create Token'\n"
+    printf "6. Copy the ENTIRE token (it's long!)\n\n"
+    
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        printf "Enter your Cloudflare API token (attempt $attempt/$max_attempts): "
+        read -s cf_token
+        echo
+        
+        printf "Enter your domain name (e.g., n8n.example.com): "
+        read domain_name
+        
+        # Validate token before proceeding
+        if validate_cloudflare_token "$cf_token" "$domain_name"; then
+            break
+        else
+            if [ $attempt -lt $max_attempts ]; then
+                printf "\n${YELLOW}Token validation failed. Please check:${NC}\n"
+                printf "- You copied the ENTIRE token\n"
+                printf "- Token has 'Zone:DNS:Edit' permission\n"
+                printf "- Token is for the correct domain\n\n"
+                printf "Try again? (y/n): "
+                read retry
+                if [ "$retry" != "y" ]; then
+                    return 1
+                fi
+            else
+                log_error "Maximum attempts reached. Please verify your token and try again."
+                return 1
+            fi
+        fi
+        ((attempt++))
+    done
+    
+    # Save credentials securely
+    cat > "$N8N_DIR/.cloudflare.ini" << EOF
+dns_cloudflare_api_token = $cf_token
+EOF
+    chmod 600 "$N8N_DIR/.cloudflare.ini"
+    
+    # Update .env with certificate settings
+    update_letsencrypt_env "letsencrypt" "$domain_name" "cloudflare"
+    
+    # Request certificate
+    log_info "Requesting Let's Encrypt certificate via Cloudflare..."
+    sudo certbot certonly \
+        --dns-cloudflare \
+        --dns-cloudflare-credentials "$N8N_DIR/.cloudflare.ini" \
+        -d "$domain_name" \
+        --non-interactive \
+        --agree-tos \
+        --email "admin@$domain_name" \
+        --cert-path "$N8N_DIR/certs" \
+        --key-path "$N8N_DIR/certs"
+    
+    if [ $? -eq 0 ]; then
+        copy_letsencrypt_certificates "$domain_name"
+        log_success "Let's Encrypt certificate obtained successfully!"
+        
+        # Restart nginx
+        cd "$N8N_DIR"
+        docker compose restart nginx
+    else
+        log_error "Failed to obtain Let's Encrypt certificate"
+        printf "\n${YELLOW}Common issues:${NC}\n"
+        printf "- DNS propagation may take a few minutes\n"
+        printf "- Ensure the domain points to Cloudflare nameservers\n"
+        printf "- Check /var/log/letsencrypt/letsencrypt.log for details\n\n"
+        return 1
+    fi
+}
+
+# Setup Let's Encrypt with AWS Route53
+setup_letsencrypt_route53() {
+    printf "\n${BLUE}AWS Route53 DNS Setup${NC}\n"
+    printf "======================\n\n"
+    
+    printf "You'll need AWS credentials with Route53 permissions.\n"
+    printf "The credentials can be obtained from AWS IAM console.\n\n"
+    
+    # Check for existing AWS credentials
+    if [ -f "$HOME/.aws/credentials" ]; then
+        printf "${YELLOW}Found existing AWS credentials.${NC}\n"
+        printf "Use existing credentials? (y/n): "
+        read use_existing
+        if [ "$use_existing" != "y" ]; then
+            printf "\nEnter AWS Access Key ID: "
+            read aws_access_key
+            printf "Enter AWS Secret Access Key: "
+            read -s aws_secret_key
+            echo
+            
+            # Create AWS credentials file
+            mkdir -p "$HOME/.aws"
+            cat > "$HOME/.aws/credentials" << EOF
+[default]
+aws_access_key_id = $aws_access_key
+aws_secret_access_key = $aws_secret_key
+EOF
+            chmod 600 "$HOME/.aws/credentials"
+        fi
+    else
+        printf "Enter AWS Access Key ID: "
+        read aws_access_key
+        printf "Enter AWS Secret Access Key: "
+        read -s aws_secret_key
+        echo
+        
+        # Optional: AWS Session Token for temporary credentials
+        printf "Enter AWS Session Token (optional, press Enter to skip): "
+        read -s aws_session_token
+        echo
+        
+        # Create AWS credentials file
+        mkdir -p "$HOME/.aws"
+        cat > "$HOME/.aws/credentials" << EOF
+[default]
+aws_access_key_id = $aws_access_key
+aws_secret_access_key = $aws_secret_key
+EOF
+        
+        if [ -n "$aws_session_token" ]; then
+            echo "aws_session_token = $aws_session_token" >> "$HOME/.aws/credentials"
+        fi
+        
+        chmod 600 "$HOME/.aws/credentials"
+    fi
+    
+    printf "\nEnter your domain name (e.g., n8n.example.com): "
+    read domain_name
+    
+    # Update .env with certificate settings
+    update_letsencrypt_env "letsencrypt" "$domain_name" "route53"
+    
+    # Request certificate
+    log_info "Requesting Let's Encrypt certificate via Route53..."
+    sudo certbot certonly \
+        --dns-route53 \
+        -d "$domain_name" \
+        --non-interactive \
+        --agree-tos \
+        --email "admin@$domain_name"
+    
+    if [ $? -eq 0 ]; then
+        copy_letsencrypt_certificates "$domain_name"
+        log_success "Let's Encrypt certificate obtained successfully!"
+        
+        # Restart nginx
+        cd "$N8N_DIR"
+        docker compose restart nginx
+    else
+        log_error "Failed to obtain Let's Encrypt certificate"
+        log_info "Please verify your AWS credentials and Route53 permissions"
+        return 1
+    fi
+}
+
+# Setup Let's Encrypt with DigitalOcean
+setup_letsencrypt_digitalocean() {
+    printf "\n${BLUE}DigitalOcean DNS Setup${NC}\n"
+    printf "=======================\n\n"
+    
+    printf "You'll need a DigitalOcean API token with DNS write permissions.\n"
+    printf "Get your token from: https://cloud.digitalocean.com/account/api/tokens\n\n"
+    
+    printf "Enter your DigitalOcean API token: "
+    read -s do_token
+    echo
+    
+    # Save credentials securely
+    cat > "$N8N_DIR/.digitalocean.ini" << EOF
+dns_digitalocean_token = $do_token
+EOF
+    chmod 600 "$N8N_DIR/.digitalocean.ini"
+    
+    printf "Enter your domain name (e.g., n8n.example.com): "
+    read domain_name
+    
+    # Update .env with certificate settings
+    update_letsencrypt_env "letsencrypt" "$domain_name" "digitalocean"
+    
+    # Request certificate
+    log_info "Requesting Let's Encrypt certificate via DigitalOcean..."
+    sudo certbot certonly \
+        --dns-digitalocean \
+        --dns-digitalocean-credentials "$N8N_DIR/.digitalocean.ini" \
+        -d "$domain_name" \
+        --non-interactive \
+        --agree-tos \
+        --email "admin@$domain_name"
+    
+    if [ $? -eq 0 ]; then
+        copy_letsencrypt_certificates "$domain_name"
+        log_success "Let's Encrypt certificate obtained successfully!"
+        
+        # Restart nginx
+        cd "$N8N_DIR"
+        docker compose restart nginx
+    else
+        log_error "Failed to obtain Let's Encrypt certificate"
+        log_info "Please verify your DigitalOcean API token and DNS settings"
+        return 1
+    fi
+}
+
+# Setup Let's Encrypt with Google Cloud DNS
+setup_letsencrypt_google() {
+    printf "\n${BLUE}Google Cloud DNS Setup${NC}\n"
+    printf "=======================\n\n"
+    
+    printf "You'll need a Google Cloud service account with DNS Admin permissions.\n"
+    printf "Download the JSON key file from Google Cloud Console.\n\n"
+    
+    printf "Enter the path to your Google Cloud service account JSON file: "
+    read json_path
+    
+    # Validate JSON file exists
+    if [ ! -f "$json_path" ]; then
+        log_error "JSON file not found: $json_path"
+        return 1
+    fi
+    
+    # Copy JSON to n8n directory for consistency
+    cp "$json_path" "$N8N_DIR/.google-cloud.json"
+    chmod 600 "$N8N_DIR/.google-cloud.json"
+    
+    printf "Enter your Google Cloud Project ID: "
+    read project_id
+    
+    # Create credentials file for certbot
+    cat > "$N8N_DIR/.google.ini" << EOF
+dns_google_credentials = $N8N_DIR/.google-cloud.json
+dns_google_project = $project_id
+EOF
+    chmod 600 "$N8N_DIR/.google.ini"
+    
+    printf "Enter your domain name (e.g., n8n.example.com): "
+    read domain_name
+    
+    # Update .env with certificate settings
+    update_letsencrypt_env "letsencrypt" "$domain_name" "google"
+    echo "GOOGLE_CLOUD_PROJECT=$project_id" >> "$N8N_DIR/.env"
+    
+    # Request certificate
+    log_info "Requesting Let's Encrypt certificate via Google Cloud DNS..."
+    sudo certbot certonly \
+        --dns-google \
+        --dns-google-credentials "$N8N_DIR/.google.ini" \
+        -d "$domain_name" \
+        --non-interactive \
+        --agree-tos \
+        --email "admin@$domain_name"
+    
+    if [ $? -eq 0 ]; then
+        copy_letsencrypt_certificates "$domain_name"
+        log_success "Let's Encrypt certificate obtained successfully!"
+        
+        # Restart nginx
+        cd "$N8N_DIR"
+        docker compose restart nginx
+    else
+        log_error "Failed to obtain Let's Encrypt certificate"
+        log_info "Please verify your Google Cloud credentials and DNS permissions"
+        return 1
+    fi
+}
+
+# Setup Let's Encrypt with Manual DNS
+setup_letsencrypt_manual() {
+    printf "\n${YELLOW}Manual DNS Challenge Setup${NC}\n"
+    printf "============================\n\n"
+    
+    printf "This option allows you to use Let's Encrypt with any DNS provider.\n"
+    printf "You will need to manually add a TXT record to your DNS.\n\n"
+    
+    printf "Enter your domain name (e.g., n8n.example.com): "
+    read domain_name
+    
+    printf "Enter your email address for Let's Encrypt notifications: "
+    read email_address
+    
+    # Update .env with certificate settings
+    update_letsencrypt_env "letsencrypt" "$domain_name" "manual"
+    
+    # Start manual challenge
+    log_info "Starting manual DNS challenge...\n"
+    
+    # Create a temporary script to handle the manual challenge
+    cat > "$N8N_DIR/manual-dns-auth.sh" << 'EOF'
+#!/bin/bash
+echo ""
+echo "==============================================="
+echo "Please add the following TXT record to your DNS:"
+echo "==============================================="
+echo ""
+echo "Record Type: TXT"
+echo "Name: _acme-challenge.$CERTBOT_DOMAIN"
+echo "Value: $CERTBOT_VALIDATION"
+echo "TTL: 60 (or lowest available)"
+echo ""
+echo "Instructions for common providers:"
+echo "  GoDaddy: DNS > Manage Zones > Add > TXT"
+echo "  Namecheap: Advanced DNS > Add New Record > TXT"
+echo "  Cloudflare: DNS > Add Record > TXT"
+echo "  Route53: Create Record > TXT"
+echo ""
+echo "==============================================="
+echo ""
+read -p "Press Enter once you've added the DNS record..."
+
+# Optional: Check DNS propagation
+echo "Checking DNS propagation (this may take a moment)..."
+for i in {1..30}; do
+    if host -t TXT _acme-challenge.$CERTBOT_DOMAIN | grep -q "$CERTBOT_VALIDATION"; then
+        echo "DNS record found! Proceeding..."
+        break
+    fi
+    echo -n "."
+    sleep 2
+done
+echo ""
+EOF
+    
+    chmod +x "$N8N_DIR/manual-dns-auth.sh"
+    
+    # Request certificate with manual DNS challenge
+    sudo certbot certonly \
+        --manual \
+        --preferred-challenges dns \
+        --manual-auth-hook "$N8N_DIR/manual-dns-auth.sh" \
+        -d "$domain_name" \
+        --non-interactive \
+        --agree-tos \
+        --email "$email_address"
+    
+    if [ $? -eq 0 ]; then
+        copy_letsencrypt_certificates "$domain_name"
+        log_success "Let's Encrypt certificate obtained successfully!"
+        
+        printf "\n${YELLOW}Important: For renewals, you'll need to update the TXT record.${NC}\n"
+        printf "The system will notify you 7 days before expiry.\n\n"
+        
+        # Restart nginx
+        cd "$N8N_DIR"
+        docker compose restart nginx
+        
+        sleep 3
+    else
+        log_error "Failed to obtain Let's Encrypt certificate"
+        return 1
+    fi
+}
+
+# Helper function to update Let's Encrypt environment variables
+update_letsencrypt_env() {
+    local cert_type="$1"
+    local domain="$2"
+    local provider="$3"
+    
+    if ! grep -q "^CERTIFICATE_TYPE=" "$N8N_DIR/.env"; then
+        echo "CERTIFICATE_TYPE=$cert_type" >> "$N8N_DIR/.env"
+        echo "LETSENCRYPT_DOMAIN=$domain" >> "$N8N_DIR/.env"
+        echo "LETSENCRYPT_DNS_PROVIDER=$provider" >> "$N8N_DIR/.env"
+    else
+        sed -i "s/^CERTIFICATE_TYPE=.*/CERTIFICATE_TYPE=$cert_type/" "$N8N_DIR/.env"
+        if grep -q "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env"; then
+            sed -i "s/^LETSENCRYPT_DOMAIN=.*/LETSENCRYPT_DOMAIN=$domain/" "$N8N_DIR/.env"
+        else
+            echo "LETSENCRYPT_DOMAIN=$domain" >> "$N8N_DIR/.env"
+        fi
+        if grep -q "^LETSENCRYPT_DNS_PROVIDER=" "$N8N_DIR/.env"; then
+            sed -i "s/^LETSENCRYPT_DNS_PROVIDER=.*/LETSENCRYPT_DNS_PROVIDER=$provider/" "$N8N_DIR/.env"
+        else
+            echo "LETSENCRYPT_DNS_PROVIDER=$provider" >> "$N8N_DIR/.env"
+        fi
+    fi
+}
+
+# Helper function to copy Let's Encrypt certificates
+copy_letsencrypt_certificates() {
+    local domain="$1"
+    
+    sudo cp "/etc/letsencrypt/live/$domain/fullchain.pem" "$N8N_DIR/certs/n8n.crt"
+    sudo cp "/etc/letsencrypt/live/$domain/privkey.pem" "$N8N_DIR/certs/n8n.key"
+    sudo chown $USER:$USER "$N8N_DIR/certs/"*
+    chmod 644 "$N8N_DIR/certs/n8n.crt"
+    chmod 600 "$N8N_DIR/certs/n8n.key"
+}
+
+# Update Let's Encrypt domain
+update_letsencrypt_domain() {
+    printf "\n${BLUE}Update Let's Encrypt Domain${NC}\n"
+    printf "============================\n\n"
+    
+    local current_domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" | cut -d'=' -f2)
+    local current_provider=$(grep "^LETSENCRYPT_DNS_PROVIDER=" "$N8N_DIR/.env" | cut -d'=' -f2)
+    
+    printf "Current domain: ${YELLOW}%s${NC}\n" "$current_domain"
+    printf "Current provider: ${YELLOW}%s${NC}\n\n" "$current_provider"
+    
+    printf "What would you like to update?\n"
+    printf "1) Change domain name only\n"
+    printf "2) Change DNS provider only\n"
+    printf "3) Change both domain and provider\n"
+    printf "0) Cancel\n\n"
+    printf "Select option: "
+    read update_choice
+    
+    case $update_choice in
+        1)
+            printf "\nEnter new domain name (e.g., n8n.newdomain.com): "
+            read new_domain
+            
+            # Update domain and re-request certificate
+            sed -i "s/^LETSENCRYPT_DOMAIN=.*/LETSENCRYPT_DOMAIN=$new_domain/" "$N8N_DIR/.env"
+            
+            log_info "Requesting certificate for new domain..."
+            case "$current_provider" in
+                "cloudflare")
+                    setup_letsencrypt_cloudflare
+                    ;;
+                "route53")
+                    setup_letsencrypt_route53
+                    ;;
+                "digitalocean")
+                    setup_letsencrypt_digitalocean
+                    ;;
+                "google")
+                    setup_letsencrypt_google
+                    ;;
+                "manual")
+                    setup_letsencrypt_manual
+                    ;;
+                *)
+                    log_error "Unknown provider: $current_provider"
+                    ;;
+            esac
+            ;;
+        2)
+            printf "\nChanging DNS provider. Please select new provider:\n"
+            setup_letsencrypt
+            ;;
+        3)
+            printf "\nChanging both domain and provider.\n"
+            setup_letsencrypt
+            ;;
+        0)
+            return
+            ;;
+        *)
+            log_error "Invalid option"
+            sleep 1
+            ;;
+    esac
+}
+
+# Renew Let's Encrypt certificate
+renew_letsencrypt_certificate() {
+    log_info "Renewing Let's Encrypt certificate..."
+    
+    local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" | cut -d'=' -f2)
+    local provider=$(grep "^LETSENCRYPT_DNS_PROVIDER=" "$N8N_DIR/.env" | cut -d'=' -f2)
+    
+    if [ -z "$domain" ]; then
+        log_error "No Let's Encrypt domain configured"
+        return 1
+    fi
+    
+    log_info "Renewing certificate for $domain using $provider provider..."
+    
+    case "$provider" in
+        "cloudflare")
+            # Cloudflare automated renewal
+            if [ ! -f "$N8N_DIR/.cloudflare.ini" ]; then
+                log_error "Cloudflare credentials not found. Please reconfigure."
+                return 1
+            fi
+            sudo certbot renew --cert-name "$domain" --quiet
+            ;;
+        "route53")
+            # AWS Route53 automated renewal
+            if [ ! -f "$HOME/.aws/credentials" ]; then
+                log_error "AWS credentials not found. Please reconfigure."
+                return 1
+            fi
+            sudo certbot renew --cert-name "$domain" --quiet
+            ;;
+        "digitalocean")
+            # DigitalOcean automated renewal
+            if [ ! -f "$N8N_DIR/.digitalocean.ini" ]; then
+                log_error "DigitalOcean credentials not found. Please reconfigure."
+                return 1
+            fi
+            sudo certbot renew --cert-name "$domain" --quiet
+            ;;
+        "google")
+            # Google Cloud DNS automated renewal
+            if [ ! -f "$N8N_DIR/.google.ini" ]; then
+                log_error "Google Cloud credentials not found. Please reconfigure."
+                return 1
+            fi
+            sudo certbot renew --cert-name "$domain" --quiet
+            ;;
+        "manual")
+            printf "\n${YELLOW}Manual DNS renewal required!${NC}\n"
+            printf "You need to update the DNS TXT record for renewal.\n\n"
+            
+            # Run manual renewal
+            sudo certbot certonly \
+                --manual \
+                --preferred-challenges dns \
+                --manual-auth-hook "$N8N_DIR/manual-dns-auth.sh" \
+                -d "$domain" \
+                --force-renewal \
+                --non-interactive \
+                --agree-tos
+            ;;
+        *)
+            log_error "Unknown DNS provider: $provider"
+            return 1
+            ;;
+    esac
+    
+    if [ $? -eq 0 ]; then
+        copy_letsencrypt_certificates "$domain"
+        
+        cd "$N8N_DIR"
+        docker compose restart nginx
+        
+        log_success "Let's Encrypt certificate renewed successfully"
+    else
+        log_error "Failed to renew Let's Encrypt certificate"
+        return 1
+    fi
+}
+
+# Configure automated security updates
+configure_auto_updates() {
+    log_function_start "configure_auto_updates"
+    
+    printf "\n${BLUE}Automated Security Updates Configuration${NC}\n"
+    printf "=========================================\n\n"
+    
+    # Install unattended-upgrades if not present
+    if ! dpkg -l | grep -q unattended-upgrades; then
+        log_info "Installing unattended-upgrades..."
+        sudo apt-get update
+        sudo apt-get install -y unattended-upgrades apt-listchanges
+    fi
+    
+    printf "Configure automatic updates for:\n"
+    printf "1) Security updates only (recommended)\n"
+    printf "2) All updates\n"
+    printf "3) Security updates + n8n auto-update\n"
+    printf "4) Disable automatic updates\n"
+    printf "0) Cancel\n\n"
+    printf "Select option: "
+    read update_choice
+    
+    case $update_choice in
+        1)
+            # Configure for security updates only
+            sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null << 'EOF'
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+EOF
+            
+            # Enable automatic updates
+            sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+            
+            log_success "Configured for automatic security updates only"
+            
+            # Update .env
+            if ! grep -q "^AUTO_UPDATES_ENABLED=" "$N8N_DIR/.env"; then
+                echo "AUTO_UPDATES_ENABLED=security" >> "$N8N_DIR/.env"
+            else
+                sed -i "s/^AUTO_UPDATES_ENABLED=.*/AUTO_UPDATES_ENABLED=security/" "$N8N_DIR/.env"
+            fi
+            ;;
+        2)
+            # Configure for all updates
+            sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null << 'EOF'
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}";
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}:${distro_codename}-updates";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+            
+            sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+            
+            log_success "Configured for all automatic updates"
+            
+            # Update .env
+            if ! grep -q "^AUTO_UPDATES_ENABLED=" "$N8N_DIR/.env"; then
+                echo "AUTO_UPDATES_ENABLED=all" >> "$N8N_DIR/.env"
+            else
+                sed -i "s/^AUTO_UPDATES_ENABLED=.*/AUTO_UPDATES_ENABLED=all/" "$N8N_DIR/.env"
+            fi
+            ;;
+        3)
+            # Configure security updates + n8n auto-update
+            # First configure security updates
+            sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null << 'EOF'
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+            
+            sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+            
+            # Enable n8n auto-update in .env
+            if ! grep -q "^AUTO_UPDATE_N8N=" "$N8N_DIR/.env"; then
+                echo "AUTO_UPDATE_N8N=true" >> "$N8N_DIR/.env"
+                echo "AUTO_UPDATES_ENABLED=security+n8n" >> "$N8N_DIR/.env"
+            else
+                sed -i "s/^AUTO_UPDATE_N8N=.*/AUTO_UPDATE_N8N=true/" "$N8N_DIR/.env"
+                sed -i "s/^AUTO_UPDATES_ENABLED=.*/AUTO_UPDATES_ENABLED=security+n8n/" "$N8N_DIR/.env"
+            fi
+            
+            log_success "Configured for security updates + n8n auto-updates"
+            log_info "n8n will be automatically updated weekly with backup"
+            ;;
+        4)
+            # Disable automatic updates
+            sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'EOF'
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::AutocleanInterval "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+            
+            log_warn "Automatic updates disabled"
+            
+            # Update .env
+            if ! grep -q "^AUTO_UPDATES_ENABLED=" "$N8N_DIR/.env"; then
+                echo "AUTO_UPDATES_ENABLED=disabled" >> "$N8N_DIR/.env"
+                echo "AUTO_UPDATE_N8N=false" >> "$N8N_DIR/.env"
+            else
+                sed -i "s/^AUTO_UPDATES_ENABLED=.*/AUTO_UPDATES_ENABLED=disabled/" "$N8N_DIR/.env"
+                sed -i "s/^AUTO_UPDATE_N8N=.*/AUTO_UPDATE_N8N=false/" "$N8N_DIR/.env"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            log_error "Invalid option"
+            sleep 1
+            ;;
+    esac
+    
+    printf "\nPress Enter to continue..."
+    read
+    
+    log_function_end "configure_auto_updates"
+}
+
+
+# Security Settings Menu (Combined with SSL)
+security_settings_menu() {
+    while true; do
+        clear
+        printf "\n${BLUE}Security & SSL Settings${NC}\n"
+        printf "========================\n\n"
+        
+        # Check certificate type
+        local cert_type=$(grep "^CERTIFICATE_TYPE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "self-signed")
+        printf "Certificate: ${YELLOW}%s${NC}" "$cert_type"
+        if [ "$cert_type" = "letsencrypt" ]; then
+            local domain=$(grep "^LETSENCRYPT_DOMAIN=" "$N8N_DIR/.env" | cut -d'=' -f2)
+            printf " (%s)" "$domain"
+        fi
+        printf "\n"
+        
+        # Check status of security features
+        printf "Firewall: "
+        if command -v ufw &> /dev/null && sudo ufw status | grep -q "Status: active"; then
+            printf "${GREEN}Enabled${NC}"
+        else
+            printf "${RED}Disabled${NC}"
+        fi
+        
+        printf " | fail2ban: "
+        if systemctl is-active --quiet fail2ban; then
+            printf "${GREEN}Enabled${NC}"
+        else
+            printf "${RED}Disabled${NC}"
+        fi
+        
+        printf " | Updates: "
+        local auto_updates=$(grep "^AUTO_UPDATES_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "disabled")
+        if [ "$auto_updates" != "disabled" ]; then
+            printf "${GREEN}%s${NC}" "$auto_updates"
+        else
+            printf "${RED}Disabled${NC}"
+        fi
+        printf "\n\n"
+        
+        printf "${BOLD}SSL Certificate Management:${NC}\n"
+        printf "1) View Certificate Details\n"
+        printf "2) Renew Current Certificate\n"
+        printf "3) Switch to Let's Encrypt (DNS-01)\n"
+        printf "4) Switch to Self-Signed\n"
+        if [ "$cert_type" = "letsencrypt" ]; then
+            printf "5) Update Let's Encrypt Domain\n"
+        fi
+        printf "\n${BOLD}Security Configuration:${NC}\n"
+        printf "6) Configure Firewall\n"
+        printf "7) View Firewall Status\n"
+        printf "8) Configure fail2ban\n"
+        printf "9) View fail2ban Status\n"
+        printf "10) Configure Automated Updates\n"
+        printf "\n${BOLD}Quick Actions:${NC}\n"
+        printf "11) Apply All Security Hardening\n"
+        printf "\n0) Back to Management Menu\n\n"
+        printf "Select option: "
+        read sec_choice
+        
+        case $sec_choice in
+            1)
+                printf "\n${BLUE}Certificate Details:${NC}\n"
+                printf "====================\n"
+                openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -text | head -20
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+            2)
+                renew_certificate
+                ;;
+            3)
+                setup_letsencrypt
+                ;;
+            4)
+                printf "\nSwitching to self-signed certificate...\n"
+                sed -i "s/^CERTIFICATE_TYPE=.*/CERTIFICATE_TYPE=self-signed/" "$N8N_DIR/.env"
+                cd "$N8N_DIR"
+                generate_ssl_certificate "$N8N_DIR/certs" "$N8N_DIR/certs/n8n.key" "$N8N_DIR/certs/n8n.crt"
+                docker compose restart nginx
+                log_success "Switched to self-signed certificate"
+                sleep 2
+                ;;
+            5)
+                if [ "$cert_type" = "letsencrypt" ]; then
+                    update_letsencrypt_domain
+                else
+                    log_error "Invalid option"
+                    sleep 1
+                fi
+                ;;
+            6)
+                configure_firewall
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+            7)
+                firewall_status
+                ;;
+            8)
+                configure_fail2ban
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+            9)
+                fail2ban_status
+                ;;
+            10)
+                configure_auto_updates
+                ;;
+            11)
+                printf "\n${YELLOW}Applying all security hardening measures...${NC}\n"
+                configure_firewall
+                configure_fail2ban
+                configure_auto_updates
+                log_success "All security measures applied"
+                printf "\nPress Enter to continue..."
+                read
+                ;;
+            0)
+                return
+                ;;
+            *)
+                log_error "Invalid option"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 # Manage environment variables
@@ -1034,7 +2399,7 @@ show_main_menu() {
             ;;
     esac
     
-    printf "q) Quit\n"
+    printf "0) Quit\n"
     printf "\n"
     printf "Select option: "
 }
@@ -1049,11 +2414,11 @@ deploy_n8n() {
     # Check requirements
     log_info "Checking requirements..."
     
-    # Install required packages
-    if ! command -v docker &> /dev/null || ! command -v jq &> /dev/null; then
-        log_info "Installing required packages..."
+    # Install required packages including security tools
+    log_info "Installing required packages and security tools..."
+    if ! command -v docker &> /dev/null || ! command -v jq &> /dev/null || ! command -v ufw &> /dev/null || ! command -v fail2ban-client &> /dev/null; then
         sudo apt-get update
-        sudo apt-get install -y ca-certificates curl gnupg jq openssl
+        sudo apt-get install -y ca-certificates curl gnupg jq openssl ufw fail2ban unattended-upgrades apt-listchanges
     fi
     
     # Install Docker if needed
@@ -1263,6 +2628,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs:/etc/nginx/certs:ro
+      - ./logs:/var/log/nginx
     depends_on:
       - n8n
     healthcheck:
@@ -1280,30 +2646,118 @@ networks:
 EOF
 fi
     
-    # Create nginx configuration
-    log_info "Creating nginx configuration..."
+    # Create nginx configuration with rate limiting
+    log_info "Creating nginx configuration with security features..."
     cat > "$N8N_DIR/nginx.conf" << 'EOF'
 events {
     worker_connections 1024;
 }
 
 http {
+    # Rate limiting zones
+    limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=api:10m rate=30r/s;
+    limit_req_zone $binary_remote_addr zone=auth:10m rate=5r/m;
+    limit_conn_zone $binary_remote_addr zone=addr:10m;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
+    # Logging with enhanced format for fail2ban
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log;
+    
     upstream n8n {
         server n8n:5678;
     }
 
     server {
-        listen 443 ssl;
+        listen 443 ssl http2;
         server_name _;
 
         ssl_certificate /etc/nginx/certs/n8n.crt;
         ssl_certificate_key /etc/nginx/certs/n8n.key;
         ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_ciphers HIGH:!aNULL:!MD5;
+        ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+        ssl_prefer_server_ciphers off;
+        ssl_session_timeout 1d;
+        ssl_session_cache shared:SSL:50m;
+        ssl_stapling on;
+        ssl_stapling_verify on;
 
         client_max_body_size 100M;
+        
+        # Connection limiting
+        limit_conn addr 100;
+        
+        # Health check endpoint (no rate limiting)
+        location /nginx-health {
+            access_log off;
+            return 200 "healthy";
+            add_header Content-Type text/plain;
+        }
+        
+        # Authentication endpoints (strict rate limiting)
+        location ~ ^/(rest/login|api/v1/auth) {
+            limit_req zone=auth burst=2 nodelay;
+            limit_req_status 429;
+            
+            proxy_pass http://n8n;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+        }
+        
+        # API endpoints (moderate rate limiting)
+        location ~ ^/api/ {
+            limit_req zone=api burst=20 nodelay;
+            limit_req_status 429;
+            
+            proxy_pass http://n8n;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+        }
+        
+        # Webhook endpoints (higher rate limit for webhooks)
+        location ~ ^/webhook/ {
+            limit_req zone=api burst=50 nodelay;
+            limit_req_status 429;
+            
+            proxy_pass http://n8n;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+        }
 
+        # Default location (general rate limiting)
         location / {
+            limit_req zone=general burst=20 nodelay;
+            limit_req_status 429;
+            
             proxy_pass http://n8n;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -1347,35 +2801,159 @@ EOF
     # Setup cron jobs
     log_info "Setting up automated tasks..."
     
-    # Create cron script first
+    # Create enhanced cron script with security updates
     mkdir -p "$N8N_DIR/scripts"
     cat > "$N8N_DIR/scripts/cron-tasks.sh" <<'EOF'
 #!/bin/bash
-# Automated maintenance tasks for n8n
+# Automated maintenance and security tasks for n8n
 
 N8N_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_FILE="$N8N_DIR/logs/cron.log"
+SCRIPT_DIR="$(dirname "$0")"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
 echo "[$(date)] Running maintenance tasks..." >> "$LOG_FILE"
 
-# Daily backup (keep last 7 days)
+# Source the main script for functions (create a minimal backup function)
+create_backup() {
+    cd "$N8N_DIR"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_dir="${GLOBAL_BACKUP_DIR:-$HOME/n8n-backups}"
+    mkdir -p "$backup_dir"
+    
+    # Stop containers for consistent backup
+    docker compose down
+    
+    # Create backup
+    TEMP_DIR=$(mktemp -d)
+    
+    # Backup database
+    if docker volume ls --format '{{.Name}}' | grep -q "n8n_postgres_data"; then
+        docker run --rm -v n8n_postgres_data:/source -v "$TEMP_DIR":/backup alpine \
+            tar -czf /backup/postgres_data_${timestamp}.tar.gz -C /source .
+    fi
+    
+    # Backup n8n data
+    if [ -d "$N8N_DIR/.n8n" ]; then
+        tar -czf "$TEMP_DIR/n8n_data_${timestamp}.tar.gz" -C "$N8N_DIR" .n8n
+    fi
+    
+    # Backup configs
+    tar -czf "$TEMP_DIR/config_${timestamp}.tar.gz" \
+        docker-compose.yml nginx.conf .env certs/ 2>/dev/null || true
+    
+    # Create combined backup
+    cd "$TEMP_DIR"
+    tar -czf "$backup_dir/full_backup_${timestamp}.tar.gz" .
+    
+    # Cleanup
+    rm -rf "$TEMP_DIR"
+    
+    # Keep only last 5 backups
+    cd "$backup_dir"
+    ls -t full_backup_*.tar.gz | tail -n +6 | xargs -r rm
+    
+    # Restart containers
+    cd "$N8N_DIR"
+    docker compose up -d
+    
+    echo "Backup created: $backup_dir/full_backup_${timestamp}.tar.gz"
+}
+
+# Daily backup
+echo "[$(date)] Starting daily backup..." >> "$LOG_FILE"
 create_backup >> "$LOG_FILE" 2>&1
 
-# Certificate check (renew if expires in 30 days)
+# Certificate check and renewal
+CERT_TYPE=$(grep "^CERTIFICATE_TYPE=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "self-signed")
+DNS_PROVIDER=$(grep "^LETSENCRYPT_DNS_PROVIDER=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "")
 CERT_FILE="$N8N_DIR/certs/n8n.crt"
-if [ -f "$CERT_FILE" ]; then
+
+if [ "$CERT_TYPE" = "letsencrypt" ]; then
+    # Check certificate expiry
+    if [ -f "$CERT_FILE" ]; then
+        EXPIRES_IN=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$CERT_FILE" | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
+        
+        if [ "$DNS_PROVIDER" = "manual" ]; then
+            # Manual DNS provider - log reminder
+            if [ "$EXPIRES_IN" -lt 7 ]; then
+                echo "[$(date)] WARNING: Let's Encrypt certificate expires in $EXPIRES_IN days!" >> "$LOG_FILE"
+                echo "[$(date)] Manual DNS renewal required. Run: ./n8n-master.sh → Manage → SSL Settings → Renew" >> "$LOG_FILE"
+            elif [ "$EXPIRES_IN" -lt 30 ]; then
+                echo "[$(date)] INFO: Let's Encrypt certificate expires in $EXPIRES_IN days" >> "$LOG_FILE"
+                echo "[$(date)] Consider scheduling manual renewal soon" >> "$LOG_FILE"
+            fi
+        else
+            # Automated renewal for API-based providers
+            echo "[$(date)] Checking Let's Encrypt certificate (expires in $EXPIRES_IN days)..." >> "$LOG_FILE"
+            if [ "$EXPIRES_IN" -lt 30 ]; then
+                certbot renew --quiet --deploy-hook "cd $N8N_DIR && docker compose restart nginx" >> "$LOG_FILE" 2>&1
+            fi
+        fi
+    fi
+elif [ -f "$CERT_FILE" ]; then
+    # Self-signed certificate check
     EXPIRES_IN=$(( ($(date -d "$(openssl x509 -enddate -noout -in "$CERT_FILE" | cut -d= -f2)" +%s) - $(date +%s)) / 86400 ))
     if [ "$EXPIRES_IN" -lt 30 ]; then
         echo "[$(date)] Certificate expires in $EXPIRES_IN days, renewing..." >> "$LOG_FILE"
-        renew_certificate >> "$LOG_FILE" 2>&1
+        cd "$N8N_DIR"
+        # Generate new self-signed certificate
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout certs/n8n.key -out certs/n8n.crt \
+            -subj "/C=US/ST=State/L=City/O=Organization/CN=n8n.local" \
+            2>/dev/null
+        docker compose restart nginx
+    fi
+fi
+
+# Check for n8n updates if enabled
+AUTO_UPDATE_N8N=$(grep "^AUTO_UPDATE_N8N=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "false")
+if [ "$AUTO_UPDATE_N8N" = "true" ]; then
+    # Check if it's Sunday (weekly update)
+    if [ "$(date +%u)" = "7" ]; then
+        echo "[$(date)] Checking for n8n updates..." >> "$LOG_FILE"
+        
+        # Create backup before update
+        echo "[$(date)] Creating pre-update backup..." >> "$LOG_FILE"
+        create_backup >> "$LOG_FILE" 2>&1
+        
+        # Update n8n
+        cd "$N8N_DIR"
+        docker compose pull n8n >> "$LOG_FILE" 2>&1
+        docker compose up -d n8n >> "$LOG_FILE" 2>&1
+        
+        echo "[$(date)] n8n update complete" >> "$LOG_FILE"
+    fi
+fi
+
+# Security updates check (runs daily)
+AUTO_UPDATES=$(grep "^AUTO_UPDATES_ENABLED=" "$N8N_DIR/.env" 2>/dev/null | cut -d'=' -f2 || echo "disabled")
+if [ "$AUTO_UPDATES" != "disabled" ]; then
+    echo "[$(date)] Running security updates check..." >> "$LOG_FILE"
+    
+    # Update package lists
+    sudo apt-get update >> "$LOG_FILE" 2>&1
+    
+    if [ "$AUTO_UPDATES" = "security" ] || [ "$AUTO_UPDATES" = "security+n8n" ]; then
+        # Security updates only
+        sudo unattended-upgrade -d >> "$LOG_FILE" 2>&1
+    elif [ "$AUTO_UPDATES" = "all" ]; then
+        # All updates
+        sudo apt-get upgrade -y >> "$LOG_FILE" 2>&1
     fi
 fi
 
 # Log rotation
 find "$N8N_DIR/logs" -name "*.log" -size +100M -exec gzip {} \;
 find "$N8N_DIR/logs" -name "*.log.gz" -mtime +30 -delete
+
+# Check fail2ban status
+if systemctl is-active --quiet fail2ban; then
+    echo "[$(date)] fail2ban is active" >> "$LOG_FILE"
+    # Log any banned IPs
+    sudo fail2ban-client status n8n-auth 2>/dev/null | grep "Banned IP" >> "$LOG_FILE" || true
+fi
 
 echo "[$(date)] Maintenance tasks complete" >> "$LOG_FILE"
 EOF
@@ -1390,6 +2968,41 @@ EOF
     
     log_info "Cron jobs configured"
     
+    
+    # Configure initial security settings
+    log_info "Applying security configurations..."
+    
+    # Configure firewall
+    configure_firewall
+    
+    # Configure fail2ban
+    configure_fail2ban
+    
+    # Enable default security updates
+    if ! grep -q "^AUTO_UPDATES_ENABLED=" "$N8N_DIR/.env"; then
+        echo "AUTO_UPDATES_ENABLED=security" >> "$N8N_DIR/.env"
+        echo "AUTO_UPDATE_N8N=false" >> "$N8N_DIR/.env"
+        
+        # Configure unattended-upgrades for security only by default
+        sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null << 'EOFA'
+Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOFA
+        
+        sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'EOFB'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Download-Upgradeable-Packages "1";
+APT::Periodic::AutocleanInterval "7";
+APT::Periodic::Unattended-Upgrade "1";
+EOFB
+        
+        log_success "Security updates enabled by default"
+    fi
     
     # Start services
     log_info "Starting n8n services..."
@@ -1485,6 +3098,17 @@ EOF
     
     # Show completion message
     show_deployment_complete
+    
+    # Show security status
+    printf "\n${GREEN}Security Features Enabled:${NC}\n"
+    printf "─────────────────────────────────────────────────────────────\n"
+    printf "✓ Firewall configured (UFW) - Ports 22, 443 only\n"
+    printf "✓ Rate limiting active - Protection against abuse\n"
+    printf "✓ fail2ban configured - Intrusion prevention\n"
+    printf "✓ Automatic security updates enabled\n"
+    printf "✓ Enhanced SSL with strong ciphers\n"
+    printf "\nAccess Security Settings: ./n8n-master.sh → Manage → Security Settings\n"
+    
     log_function_end "deploy_n8n"
 }
 
@@ -1754,6 +3378,10 @@ show_deployment_complete() {
     printf "✓ Log rotation\n"
     printf "✓ Environment variable management\n"
     printf "✓ LAN accessible (port 443)\n"
+    printf "✓ Firewall protection (UFW)\n"
+    printf "✓ Rate limiting & DDoS protection\n"
+    printf "✓ Intrusion prevention (fail2ban)\n"
+    printf "✓ Automatic security updates\n"
     printf "\n"
     
     printf "${YELLOW}⚠️  Browser Warning:${NC}\n"
@@ -1907,7 +3535,7 @@ main() {
                         uninstall_n8n
                     fi
                     ;;
-                q|Q)
+                0)
                     printf "\nGoodbye!\n"
                     exit 0
                     ;;

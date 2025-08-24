@@ -1,13 +1,13 @@
-# n8n Self-Hosted Community Edition Master Script - Complete Lifecycle Management
+# n8n Self-Hosted Master Script - Complete Lifecycle Management
 
 A comprehensive master script for deploying, managing, and maintaining n8n with PostgreSQL, Nginx, and automated features. This all-in-one solution handles installation, updates, backups, uninstallation, and complete environment management with no external port exposure required.
 
 ## 🚀 Features
 
+### Core Features
 - **All-in-One Script**: Single master script for deployment, management, and uninstallation (no separate files)
 - **Smart Installation**: Auto-detects installation state and offers appropriate options
 - **Data Preservation**: Choose which backup to restore when multiple are available
-- **Secure by Default**: Self-signed SSL certificate with 10-year validity and multiple IP address support
 - **Complete Environment Management**: Add/update/remove variables with automatic docker-compose.yml updates and service recreation
 - **Automated Backups**: Daily backups with configurable retention (default: 5 backups)
 - **Comprehensive Logging**: All operations logged to `~/n8n-operations.log` with timestamps
@@ -16,10 +16,17 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 - **Version Management**: Easy updates with automatic backup creation
 - **Systemd Integration**: Auto-start on boot with proper service management
 - **Docker Compose v2**: Full compatibility with latest Docker Compose
-- **Automated Maintenance**: Log rotation, certificate renewal checks, cleanup tasks
 - **Interactive Menus**: User-friendly command-line interface with built-in management functions
 - **Direct Commands**: Script automation support with command-line arguments
-- **Deprecation Compliance**: Includes latest n8n environment variables to address deprecation warnings
+
+### 🔒 Enhanced Security Features (v2.1.0)
+- **Let's Encrypt Support**: Toggle between self-signed and Let's Encrypt certificates with DNS-01 challenge
+- **Firewall Protection**: UFW firewall with secure default rules (ports 22, 443 only)
+- **Rate Limiting**: Nginx-based rate limiting to prevent abuse and DDoS attacks
+- **Intrusion Prevention**: fail2ban configured for blocking malicious IPs
+- **Automatic Security Updates**: Configurable OS and package security updates
+- **Enhanced SSL/TLS**: Strong ciphers, TLS 1.2/1.3 only, security headers
+- **Security Hardening**: Automated application of all security best practices
 
 ## 📋 Requirements
 
@@ -34,7 +41,7 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 
 ### 1. Download the Master Script
 ```bash
-wget https://raw.githubusercontent.com/xxxmtixxx/n8n-Self-Hosted-Community-Edition-Master-Script/main/n8n-master.sh
+wget https://raw.githubusercontent.com/xxxmtixxx/n8n-Self-Hosted-Master-Script/main/n8n-master.sh
 # or create it manually:
 nano n8n-master.sh
 # Then paste the script content and save (Ctrl+X, Y, Enter)
@@ -91,8 +98,13 @@ All management functions are now built directly into the master script. Once ins
 7. **Update n8n** - Update to latest version with automatic backup
 8. **Health Check** - Comprehensive system health analysis
 9. **Show Version** - Display current n8n version
-10. **Renew SSL Certificate** - Manual certificate renewal
-11. **Manage Environment Variables** - Add/update/remove variables with automatic service recreation
+10. **Manage Environment Variables** - Add/update/remove variables with automatic service recreation
+11. **Security & SSL Settings** - Complete security and certificate management:
+    - SSL certificate management (Let's Encrypt/self-signed)
+    - Firewall configuration
+    - fail2ban setup
+    - Automated updates
+    - Security hardening
 
 ## 🔐 Environment Variable Management
 
@@ -381,6 +393,20 @@ tail -50 ~/n8n-operations.log
 ./n8n-master.sh → 1) Manage n8n → 4) Recreate Services
 ```
 
+### Locked Out by fail2ban
+```bash
+# If you're accidentally banned by fail2ban:
+
+# Option 1: Unban your specific IP
+./n8n-master.sh → Manage n8n → Security & SSL Settings → View fail2ban Status → Manage Banned IPs → Unban Specific IP
+
+# Option 2: Add your IP to permanent whitelist  
+./n8n-master.sh → Manage n8n → Security & SSL Settings → View fail2ban Status → Manage Banned IPs → Add IP to Whitelist
+
+# Option 3: Emergency clear all bans (if you can't access via SSH)
+# From another system or console: sudo fail2ban-client unban --all
+```
+
 ### Docker Permission Issues
 If you see "permission denied" errors:
 ```bash
@@ -456,16 +482,26 @@ N8N_LOG_LEVEL = "warn"
 tail -100 ~/n8n-operations.log
 ```
 
-## 🆕 Recent Improvements (v2.0.0)
+## 🆕 Recent Improvements
 
+### Version 2.1.0 - Security Enhancements
+- **Let's Encrypt Integration**: Support for free SSL certificates with DNS-01 challenge
+- **Firewall Management**: Automated UFW configuration with secure defaults
+- **Rate Limiting**: Comprehensive rate limiting to prevent abuse
+- **Intrusion Prevention**: fail2ban integration with automatic IP blocking
+- **Automatic Updates**: Configurable security and application updates
+- **Security Hardening**: One-click application of all security best practices
+- **Enhanced Monitoring**: Security status in health checks and logs
+
+### Version 2.0.0 - Core Improvements
 - **Unified Architecture**: Single master script with all functions built-in
-- **Enhanced SSL Certificates**: Multiple IP address support with SAN extensions for seamless access
+- **Enhanced SSL Certificates**: Multiple IP address support with SAN extensions
 - **Comprehensive Logging**: All operations logged with timestamps
-- **Automatic Service Recreation**: Environment variable management prompts for immediate service recreation
+- **Automatic Service Recreation**: Environment variable management with prompts
 - **Backup Unification**: Consistent backup format across all operations
 - **Enhanced Error Handling**: Better error messages and recovery suggestions
-- **Deprecation Compliance**: Added `N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS` and `N8N_RUNNERS_ENABLED` variables
-- **Docker Compose Integration**: Environment variables properly added to both .env and docker-compose.yml
+- **Deprecation Compliance**: Latest n8n environment variables
+- **Docker Compose Integration**: Proper environment variable management
 
 ## 🤝 Contributing
 
@@ -475,17 +511,184 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 This deployment script is provided as-is for use with n8n. n8n itself is licensed under the [Sustainable Use License](https://github.com/n8n-io/n8n/blob/master/LICENSE.md).
 
+## 🔒 Security Configuration
+
+### SSL Certificate Management
+
+The script now supports both self-signed certificates and Let's Encrypt with DNS-01 challenge:
+
+#### Switching to Let's Encrypt
+```bash
+./n8n-master.sh → Manage n8n → Security & SSL Settings → Switch to Let's Encrypt
+```
+
+**Supported DNS Providers**:
+- **Cloudflare** - Automated with API token
+- **AWS Route53** - Automated with IAM credentials
+- **DigitalOcean** - Automated with API token
+- **Google Cloud DNS** - Automated with service account
+- **Manual DNS** - Works with any provider (GoDaddy, Namecheap, etc.)
+
+**Benefits of DNS-01 Challenge**:
+- No need to open port 80
+- Works behind firewalls/NAT
+- Wildcard certificate support
+- More secure than HTTP-01
+
+#### Provider Setup Instructions:
+
+**Cloudflare**:
+1. Get API token: https://dash.cloudflare.com/profile/api-tokens
+2. Create token with "Zone:DNS:Edit" permissions
+3. Enter token when prompted
+
+**AWS Route53**:
+1. Create IAM user with Route53 permissions
+2. Generate Access Key ID and Secret Access Key
+3. Enter credentials when prompted
+4. Optional: Support for session tokens (temporary credentials)
+
+**DigitalOcean**:
+1. Get API token: https://cloud.digitalocean.com/account/api/tokens
+2. Generate token with write scope
+3. Enter token when prompted
+
+**Google Cloud DNS**:
+1. Create service account in GCP Console
+2. Grant "DNS Administrator" role
+3. Download JSON key file
+4. Provide path to JSON file when prompted
+
+**Manual DNS (Any Provider)**:
+1. Script shows exact TXT record to add
+2. Add record in your DNS provider's control panel
+3. Press Enter to verify and complete
+4. Works with GoDaddy, Namecheap, or any DNS provider
+
+### Firewall Configuration
+
+UFW (Uncomplicated Firewall) is automatically configured during installation:
+
+**Default Rules**:
+- Allow SSH (port 22)
+- Allow HTTPS (port 443)
+- Deny all other incoming
+- Allow all outgoing
+
+**Management**:
+```bash
+./n8n-master.sh → Manage n8n → Security & SSL Settings → Configure Firewall
+```
+
+### Rate Limiting
+
+Nginx rate limiting is automatically configured to prevent abuse:
+
+**Limits by Endpoint**:
+- Authentication: 5 requests/minute
+- API endpoints: 30 requests/second (burst: 20)
+- Webhooks: 50 requests/second (burst: 50)
+- General: 10 requests/second (burst: 20)
+- Connection limit: 100 per IP
+
+### fail2ban Configuration
+
+Automatically blocks IPs after repeated failed attempts:
+
+**Jail Configuration**:
+- **n8n-auth**: 5 failed logins = 1 hour ban
+- **nginx-limit-req**: 10 rate limit hits/minute = 10 minute ban
+- **sshd**: SSH brute force protection (default fail2ban jail)
+
+**Management**:
+```bash
+./n8n-master.sh → Manage n8n → Security & SSL Settings → View fail2ban Status
+```
+
+### fail2ban IP Management
+
+Advanced IP management capabilities for handling false positives and security threats:
+
+**Access IP Management:**
+```bash
+./n8n-master.sh → Manage n8n → Security & SSL Settings → View fail2ban Status → Manage Banned IPs
+```
+
+**Features:**
+1. **View All Banned IPs** - Monitor current threats across all jails
+2. **Unban Specific IP** - Remove false positive bans
+   - Unban from all jails at once
+   - Unban from specific jail only
+3. **Add IP to Whitelist** - Permanently trust specific IPs
+   - Supports descriptions for documentation
+   - Automatically restarts fail2ban to apply changes
+4. **View Whitelist** - Show all currently trusted IPs
+5. **Emergency Unban All** - Clear all bans from all jails (with confirmation)
+
+**Common Use Cases:**
+- **False Positive**: Use "Unban Specific IP" to restore legitimate access
+- **Trusted Admin IP**: Use "Add to Whitelist" for your office/home IP
+- **System Reset**: Use "Emergency Unban All" to clear all bans after issues
+- **Security Monitoring**: Use "View All Banned IPs" to monitor threats
+
+**Advanced Features:**
+- **IP Validation**: Automatic validation of IP address format
+- **Safety Checks**: Clear error messages for invalid entries
+- **Confirmations**: Prompts for destructive actions
+- **Backup System**: Automatic backup of configuration files before changes
+- **Professional Interface**: Clean status displays and intuitive navigation
+
+### Automatic Security Updates
+
+Configurable automatic update options:
+
+1. **Security updates only** (default)
+2. **All system updates**
+3. **Security updates + n8n auto-update**
+4. **Disabled**
+
+**Configure**:
+```bash
+./n8n-master.sh → Manage n8n → Security & SSL Settings → Configure Automated Updates
+```
+
+**n8n Auto-Updates**:
+- Weekly schedule (Sundays)
+- Automatic backup before update
+- Rollback capability on failure
+
+### Security Hardening
+
+Apply all security measures at once:
+```bash
+./n8n-master.sh → Manage n8n → Security & SSL Settings → Apply All Security Hardening
+```
+
+This enables:
+- Firewall with secure rules
+- fail2ban with default jails
+- Automatic security updates
+- Rate limiting
+- Security headers
+
 ## ⚠️ Disclaimer
 
-This script is designed for LAN/development use. For production deployments exposed to the internet, implement additional security measures:
-- Use proper SSL certificates (Let's Encrypt)
-- Configure firewall rules
-- Implement rate limiting
-- Enable fail2ban
-- Regular security updates
+This script now includes enterprise-grade security features suitable for production use. The enhanced security measures include:
+- ✅ Proper SSL certificates (Let's Encrypt with DNS-01)
+- ✅ Configured firewall rules (UFW)
+- ✅ Rate limiting implementation
+- ✅ fail2ban enabled
+- ✅ Automatic security updates
+
+For internet-facing deployments, consider additional measures:
+- Use a reverse proxy/CDN (Cloudflare)
+- Implement application-level authentication
+- Regular security audits
+- Monitoring and alerting
 
 ---
 
-**Version**: 2.0.0  
+**Version**: 2.1.0  
 **Last Updated**: December 2024  
-**Tested On**: Ubuntu 22.04/24.04 LTS, Debian 11/12
+**Tested On**: Ubuntu 22.04/24.04 LTS, Debian 11/12  
+**Security Level**: Production-Ready with Enhanced Security

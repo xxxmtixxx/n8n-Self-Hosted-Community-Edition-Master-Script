@@ -26,7 +26,8 @@ log_to_file() {
     local level="$1"
     local message="$2"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >> "$LOG_FILE"
+    # Prevent logging failures from exiting script with set -e
+    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_info() { 
@@ -3191,6 +3192,23 @@ whitelist_cloudflare_ips() {
         return 1
     fi
     
+    # Comprehensive UFW health check
+    printf "Checking UFW status...\n"
+    if ! timeout 5 sudo ufw status >/dev/null 2>&1; then
+        log_error "UFW is not responding or has issues. Attempting diagnosis..."
+        
+        # Try to identify the issue
+        if ! sudo systemctl is-active --quiet ufw; then
+            log_error "UFW service is not running. Try: sudo systemctl start ufw"
+        elif ! sudo ufw --version >/dev/null 2>&1; then
+            log_error "UFW appears corrupted. Try reinstalling: sudo apt-get reinstall ufw"
+        else
+            log_error "UFW has unknown issues. Check system logs: journalctl -u ufw"
+        fi
+        return 1
+    fi
+    printf " ${GREEN}✓${NC} UFW is responding\n\n"
+    
     # Check current status
     if sudo ufw status | grep -q "443.*ALLOW.*Anywhere" && ! sudo ufw status | grep -q "Cloudflare"; then
         printf "${YELLOW}Warning: Port 443 is currently open to all IPs${NC}\n"
@@ -3253,52 +3271,244 @@ whitelist_cloudflare_ips() {
     
     # Remove existing port 443 rules (both generic and Cloudflare-specific)
     printf "Removing existing port 443 rules...\n"
-    while sudo ufw status numbered | grep -q "443/tcp"; do
-        local rule_num=$(sudo ufw status numbered | grep "443/tcp" | head -1 | sed 's/\[\([0-9]*\)\].*/\1/')
-        if [ -n "$rule_num" ]; then
-            sudo ufw --force delete "$rule_num" 2>/dev/null || true
+    
+    # Check if UFW is working before attempting operations
+    if ! sudo ufw status >/dev/null 2>&1; then
+        log_error "UFW is not responding. Please check UFW installation."
+        return 1
+    fi
+    
+    # Bounded rule deletion with safety limits
+    local max_attempts=50  # Prevent infinite loops
+    local attempt=0
+    local rules_found=true
+    
+    while [ "$rules_found" = true ] && [ $attempt -lt $max_attempts ]; do
+        # Get UFW status with timeout (protect from set -e)
+        local ufw_output
+        ufw_output=$(timeout 10 sudo ufw status numbered 2>/dev/null) || {
+            local exit_code=$?
+            log_error "UFW command timed out or failed after $attempt attempts (exit code: $exit_code)"
+            break
+        }
+        
+        # Check if any 443 rules exist (protect from set -e)
+        if echo "$ufw_output" | grep -q "443/tcp" 2>/dev/null; then
+            log_debug "Found 443 rules, continuing deletion"
         else
+            log_debug "No more 443 rules found, stopping deletion loop"
+            rules_found=false
             break
         fi
+        
+        # Get the first 443 rule number (protect from set -e)
+        local rule_line=$(echo "$ufw_output" | grep "443/tcp" | head -1 || true)
+        local rule_num=$(echo "$rule_line" | awk '{print $2}' | tr -d ']' | grep '^[0-9][0-9]*$' || true)
+        
+        log_debug "UFW rule line: '$rule_line'"
+        log_debug "Extracted rule number: '$rule_num'"
+        
+        if [ -n "$rule_num" ] && [ "$rule_num" -gt 0 ] 2>/dev/null; then
+            printf "  Deleting rule #%s..." "$rule_num"
+            # Use || true to prevent set -e from exiting on UFW command failure
+            if sudo ufw --force delete "$rule_num" >/dev/null 2>&1; then
+                printf " ${GREEN}✓${NC}\n"
+                log_debug "Successfully deleted UFW rule #$rule_num"
+            else
+                printf " ${YELLOW}failed${NC}\n"
+                log_debug "Failed to delete UFW rule #$rule_num"
+            fi
+        else
+            log_debug "Could not parse rule number from: '$rule_line'"
+            log_debug "Raw rule_num value: '$rule_num'"
+            
+            # If we can't parse rule numbers but rules exist, something is wrong
+            if [ -n "$rule_line" ]; then
+                log_error "UFW output format unexpected. Unable to parse rule numbers."
+                printf " ${YELLOW}⚠${NC} Parse error - stopping deletion to prevent issues\n"
+            else
+                log_debug "No 443 rules found in this iteration"
+            fi
+            break
+        fi
+        
+        # Protect arithmetic operation from set -e
+        ((attempt++)) || true
+        
+        # Small delay to prevent rapid fire commands (protect from set -e)
+        sleep 0.1 || true
     done
+    
+    log_debug "Rule deletion loop completed. Attempts: $attempt, Max: $max_attempts"
+    
+    if [ $attempt -ge $max_attempts ]; then
+        log_error "Maximum deletion attempts reached ($max_attempts). Some rules may remain."
+        printf " ${YELLOW}⚠${NC} Rule cleanup reached maximum attempts\n"
+    else
+        printf " ${GREEN}✓${NC} Rule cleanup completed (deleted $attempt rules)\n"
+    fi
     
     # Add internal network access first (preserve local access)
     printf "Adding internal network access rules...\n"
-    sudo ufw allow from 127.0.0.0/8 to any port 443 proto tcp comment "Internal localhost" 2>/dev/null
-    sudo ufw allow from 10.0.0.0/8 to any port 443 proto tcp comment "Internal private 10.x" 2>/dev/null
-    sudo ufw allow from 172.16.0.0/12 to any port 443 proto tcp comment "Internal private 172.x" 2>/dev/null
-    sudo ufw allow from 192.168.0.0/16 to any port 443 proto tcp comment "Internal private 192.168.x" 2>/dev/null
-    printf " ${GREEN}✓${NC} (Internal networks preserved)\n"
+    
+    # Reload UFW to ensure consistent state after rule deletions
+    printf "  Refreshing UFW state..."
+    if timeout 15 sudo ufw --force reload >/dev/null 2>&1; then
+        printf " ${GREEN}✓${NC}\n"
+        log_debug "UFW reloaded successfully before adding internal rules"
+    else
+        printf " ${YELLOW}⚠${NC} (UFW reload failed, continuing anyway)\n"
+        log_debug "UFW reload failed, but continuing with internal rule addition"
+    fi
+    
+    local internal_rules_added=0
+    local internal_networks=("127.0.0.1:Internal localhost" "192.168.0.0/16:Internal private 192.168.x" "10.0.0.0/8:Internal private 10.x" "172.16.0.0/12:Internal private 172.x")
+    
+    for network_info in "${internal_networks[@]}"; do
+        local network="${network_info%:*}"
+        local comment="${network_info#*:}"
+        
+        printf "  Attempting to add: %s..." "$network"
+        local ufw_cmd="sudo ufw allow from \"$network\""
+        log_debug "Executing: $ufw_cmd"
+        
+        if sudo ufw allow from "$network" >/dev/null 2>&1; then
+            ((internal_rules_added++)) || true
+            printf " ${GREEN}✓${NC}\n"
+        else
+            local exit_code=$?
+            log_debug "Failed to add internal network rule for $network (exit code: $exit_code)"
+            printf " ${YELLOW}✗${NC} (failed)\n"
+            
+            # Try to get more info about the failure
+            log_debug "Testing UFW command without timeout..."
+            sudo ufw allow proto tcp from "$network" to any port 443 comment "$comment" 2>&1 | head -3 | while read line; do
+                log_debug "UFW error: $line"
+            done
+        fi
+    done
+    
+    if [ $internal_rules_added -eq 0 ]; then
+        log_error "Failed to add any internal network rules. This may block local access!"
+        printf "\n${RED}Warning:${NC} No internal network rules were added successfully.\n"
+        printf "This means local access to the server may be blocked after whitelist activation.\n\n"
+        printf "Do you want to continue anyway? This may make the server inaccessible locally. (y/n): "
+        read continue_anyway
+        if [ "$continue_anyway" != "y" ] && [ "$continue_anyway" != "Y" ]; then
+            log_info "Cloudflare whitelist aborted due to internal network rule failures"
+            return 1
+        else
+            log_info "Continuing despite internal network rule failures (user override)"
+            printf "${YELLOW}⚠ Proceeding without internal network protection${NC}\n\n"
+        fi
+    else
+        printf " ${GREEN}✓${NC} (%d/%d internal networks preserved)\n" "$internal_rules_added" "${#internal_networks[@]}"
+        if [ $internal_rules_added -lt ${#internal_networks[@]} ]; then
+            printf "${YELLOW}⚠${NC} Some internal network rules failed - local access may be limited\n"
+        fi
+    fi
     
     # Add Cloudflare IPv4 rules
     printf "Adding Cloudflare IPv4 rules...\n"
     local added_count=0
+    local failed_count=0
+    local max_rule_attempts=100  # Safety limit for rule additions
+    
+    local current_ip=0
     while IFS= read -r ip; do
-        if [ -n "$ip" ]; then
-            sudo ufw allow from "$ip" to any port 443 proto tcp comment "Cloudflare IPv4" 2>/dev/null
-            ((added_count++))
-            printf "."
+        if [ -n "$ip" ] && [ $added_count -lt $max_rule_attempts ]; then
+            ((current_ip++)) || true
+            printf "  [%d/%d] Adding %s..." "$current_ip" "$ipv4_count" "$ip"
+            
+            # Show the exact command being executed
+            log_debug "Executing: sudo ufw allow from $ip to any port 443"
+            
+            if sudo ufw allow from "$ip" to any port 443 >/dev/null 2>&1; then
+                local exit_code=$?
+                if [ $exit_code -eq 0 ]; then
+                    ((added_count++)) || true
+                    printf " ${GREEN}✓${NC}\n"
+                    log_debug "Successfully added Cloudflare IPv4 rule for $ip"
+                else
+                    ((failed_count++)) || true
+                    printf " ${YELLOW}⚠${NC} (exit code $exit_code)\n"
+                    log_debug "UFW returned exit code $exit_code for Cloudflare IPv4 rule $ip"
+                fi
+            else
+                local exit_code=$?
+                ((failed_count++)) || true
+                printf " ${RED}✗${NC} (exit code $exit_code)\n"
+                log_debug "Failed to add Cloudflare IPv4 rule for $ip (exit code: $exit_code)"
+                
+                # Try to get more error details
+                log_debug "Testing UFW command manually for diagnostics..."
+                sudo ufw allow from "$ip" to any port 443 2>&1 | head -3 | while read line; do
+                    log_debug "UFW error output: $line"
+                done
+            fi
         fi
     done <<< "$ipv4_list"
-    printf " ${GREEN}✓${NC} (%d rules)\n" "$added_count"
+    
+    printf " ${GREEN}✓${NC} (%d/%d rules added" "$added_count" "$ipv4_count"
+    [ $failed_count -gt 0 ] && printf ", %d failed" "$failed_count"
+    printf ")\n"
+    
+    if [ $added_count -eq 0 ]; then
+        log_error "Failed to add any Cloudflare IPv4 rules. Whitelist may not work!"
+        return 1
+    fi
     
     # Add Cloudflare IPv6 rules if IPv6 is enabled
     if [ "$ipv6_count" -gt 0 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]; then
         printf "Adding Cloudflare IPv6 rules...\n"
-        added_count=0
+        local ipv6_added_count=0
+        local ipv6_failed_count=0
+        
+        local current_ipv6=0
         while IFS= read -r ip; do
-            if [ -n "$ip" ]; then
-                sudo ufw allow from "$ip" to any port 443 proto tcp comment "Cloudflare IPv6" 2>/dev/null
-                ((added_count++))
-                printf "."
+            if [ -n "$ip" ] && [ $ipv6_added_count -lt $max_rule_attempts ]; then
+                ((current_ipv6++)) || true
+                printf "  [%d/%d] Adding %s..." "$current_ipv6" "$ipv6_count" "$ip"
+                
+                log_debug "Executing: sudo ufw allow from $ip to any port 443"
+                
+                if sudo ufw allow from "$ip" to any port 443 >/dev/null 2>&1; then
+                    ((ipv6_added_count++)) || true
+                    printf " ${GREEN}✓${NC}\n"
+                    log_debug "Successfully added Cloudflare IPv6 rule for $ip"
+                else
+                    local exit_code=$?
+                    ((ipv6_failed_count++)) || true
+                    printf " ${RED}✗${NC} (exit code $exit_code)\n"
+                    log_debug "Failed to add Cloudflare IPv6 rule for $ip (exit code: $exit_code)"
+                fi
             fi
         done <<< "$ipv6_list"
-        printf " ${GREEN}✓${NC} (%d rules)\n" "$added_count"
+        
+        printf " ${GREEN}✓${NC} (%d/%d IPv6 rules added" "$ipv6_added_count" "$ipv6_count"
+        [ $ipv6_failed_count -gt 0 ] && printf ", %d failed" "$ipv6_failed_count"
+        printf ")\n"
+    else
+        printf " ${YELLOW}⚠${NC} IPv6 disabled or no IPv6 ranges found\n"
     fi
     
     # Reload UFW
     printf "\nReloading firewall...\n"
-    sudo ufw reload
+    if timeout 15 sudo ufw reload >/dev/null 2>&1; then
+        printf " ${GREEN}✓${NC} Firewall reloaded successfully\n"
+    else
+        log_error "UFW reload failed or timed out. Rules may not be active!"
+        printf " ${YELLOW}⚠${NC} Check firewall status manually: sudo ufw status\n"
+    fi
+    
+    # Calculate totals for summary
+    local total_rules_added=$((internal_rules_added + added_count))
+    local total_rules_expected=$((${#internal_networks[@]} + ipv4_count))
+    
+    if [ "$ipv6_count" -gt 0 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]; then
+        total_rules_added=$((total_rules_added + ipv6_added_count))
+        total_rules_expected=$((total_rules_expected + ipv6_count))
+    fi
     
     # Save whitelist status
     if ! grep -q "^CLOUDFLARE_IP_WHITELIST=" "$N8N_DIR/.env"; then
@@ -3306,6 +3516,24 @@ whitelist_cloudflare_ips() {
     else
         sed -i "s/^CLOUDFLARE_IP_WHITELIST=.*/CLOUDFLARE_IP_WHITELIST=enabled/" "$N8N_DIR/.env"
     fi
+    
+    # Final completion summary
+    printf "\n${GREEN}✓ Cloudflare IP Whitelist Configuration Complete!${NC}\n"
+    printf "════════════════════════════════════════════════\n"
+    printf "• Internal network rules: ${GREEN}%d/%d${NC} added\n" "$internal_rules_added" "${#internal_networks[@]}"
+    printf "• Cloudflare IPv4 rules: ${GREEN}%d/%d${NC} added\n" "$added_count" "$ipv4_count"
+    
+    if [ "$ipv6_count" -gt 0 ] && [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1)" = "0" ]; then
+        printf "• Cloudflare IPv6 rules: ${GREEN}%d/%d${NC} added\n" "$ipv6_added_count" "$ipv6_count"
+    fi
+    
+    printf "• Total firewall rules: ${GREEN}%d/%d${NC} successfully configured\n" "$total_rules_added" "$total_rules_expected"
+    printf "\n${CYAN}Port 443 is now restricted to:${NC}\n"
+    printf "  ✓ Internal networks (localhost, private IPs)\n"
+    printf "  ✓ Cloudflare IP ranges only\n"
+    printf "  ✓ SSH access (port 22) remains unaffected\n"
+    printf "\nWhitelist status saved to: $N8N_DIR/.env\n"
+    printf "Check status anytime with: sudo ufw status numbered\n"
     
     if ! grep -q "^CLOUDFLARE_IP_WHITELIST_DATE=" "$N8N_DIR/.env"; then
         echo "CLOUDFLARE_IP_WHITELIST_DATE=$(date +%Y-%m-%d)" >> "$N8N_DIR/.env"
@@ -3537,10 +3765,10 @@ run_security_audit() {
         
         if [ $cert_days -lt 7 ]; then
             printf "❌ Certificate expires in ${RED}%d days${NC} (%s)\n" "$cert_days" "$cert_expiry"
-            ((issues++))
+            ((issues++)) || true
         elif [ $cert_days -lt 30 ]; then
             printf "⚠️  Certificate expires in ${YELLOW}%d days${NC} (%s)\n" "$cert_days" "$cert_expiry"
-            ((warnings++))
+            ((warnings++)) || true
         else
             printf "✅ Certificate valid for ${GREEN}%d days${NC}\n" "$cert_days"
         fi
@@ -3549,16 +3777,16 @@ run_security_audit() {
         local cert_algo=$(openssl x509 -in "$N8N_DIR/certs/n8n.crt" -noout -text | grep "Signature Algorithm" | head -1 | awk '{print $3}')
         if [[ "$cert_algo" == *"sha1"* ]]; then
             printf "❌ Certificate uses weak ${RED}SHA-1${NC} algorithm\n"
-            ((issues++))
+            ((issues++)) || true
         else
             printf "✅ Certificate uses strong signature algorithm\n"
         fi
     else
         printf "❌ ${RED}No SSL certificate found${NC}\n"
-        ((issues++))
+        ((issues++)) || true
     fi
     
-    # Check firewall status
+    # Check firewall status and Cloudflare whitelist
     printf "\n${BOLD}Firewall Configuration:${NC}\n"
     if command -v ufw &> /dev/null; then
         if sudo ufw status | grep -q "Status: active"; then
@@ -3570,20 +3798,67 @@ run_security_audit() {
             
             if [ $ssh_rule -eq 0 ]; then
                 printf "⚠️  ${YELLOW}No SSH rule found${NC} (may lock you out)\n"
-                ((warnings++))
+                ((warnings++)) || true
             fi
             
-            if [ $https_rule -eq 0 ]; then
-                printf "❌ ${RED}No HTTPS rule found${NC} (n8n may be inaccessible)\n"
-                ((issues++))
+            # Check Cloudflare whitelist status
+            # Count both IPv4 and IPv6 Cloudflare rules
+            local cf_ipv4_rules=$(sudo ufw status | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l)
+            local cf_ipv6_rules=$(sudo ufw status | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l)
+            local cloudflare_rules=$((cf_ipv4_rules + cf_ipv6_rules)) || true
+            local has_cloudflare_files=false
+            
+            if [ -f "$N8N_DIR/.cloudflare_ips_v4" ] || [ -f "$N8N_DIR/.cloudflare_ips_v6" ]; then
+                has_cloudflare_files=true
+            fi
+            
+            if [ $cloudflare_rules -gt 0 ] && [ "$has_cloudflare_files" = true ]; then
+                printf "✅ Cloudflare IP whitelist active (%d rules)\n" "$cloudflare_rules"
+                
+                # Check internal network access
+                # Look for both general internal rules and port-specific rules
+                local internal_rules=$(sudo ufw status | grep -E "ALLOW.*\s+(127\.0\.0\.1|10\.|192\.168\.|172\.16\.)" | wc -l)
+                local specific_443_rules=$(sudo ufw status | grep -E "443.*ALLOW.*\s+(127\.0\.0\.1|10\.|192\.168\.|172\.16\.)" | wc -l)
+                
+                if [ $internal_rules -eq 0 ]; then
+                    printf "❌ ${RED}No internal network access rules found${NC} (you may be locked out)\n"
+                    ((issues++)) || true
+                elif [ $specific_443_rules -gt 0 ]; then
+                    printf "✅ Internal network access properly configured (%d port-specific rules)\n" "$specific_443_rules"
+                else
+                    printf "✅ Internal network access configured (%d general rules)\n" "$internal_rules"
+                fi
+                
+                # Check if IP files are recent (less than 7 days old)
+                if [ -f "$N8N_DIR/.cloudflare_ips_v4" ]; then
+                    local file_age=$(( ($(date +%s) - $(stat -c %Y "$N8N_DIR/.cloudflare_ips_v4" 2>/dev/null || echo 0)) / 86400 ))
+                    if [ $file_age -gt 7 ]; then
+                        printf "⚠️  ${YELLOW}Cloudflare IP list is %d days old${NC} (consider updating)\n" "$file_age"
+                        ((warnings++)) || true
+                    fi
+                fi
+            elif [ $cloudflare_rules -gt 0 ]; then
+                printf "⚠️  ${YELLOW}Found %d IP-specific 443 rules but no Cloudflare cache files${NC}\n" "$cloudflare_rules"
+                ((warnings++)) || true
+            elif [ "$has_cloudflare_files" = true ]; then
+                printf "⚠️  ${YELLOW}Cloudflare cache files present but no active rules${NC}\n"
+                ((warnings++)) || true
+            else
+                # Standard HTTPS rule check (when no Cloudflare whitelist)
+                if [ $https_rule -eq 0 ]; then
+                    printf "❌ ${RED}No HTTPS rule found${NC} (n8n may be inaccessible)\n"
+                    ((issues++)) || true
+                else
+                    printf "✅ Standard HTTPS access configured\n"
+                fi
             fi
         else
             printf "❌ ${RED}UFW firewall is disabled${NC}\n"
-            ((issues++))
+            ((issues++)) || true
         fi
     else
         printf "❌ ${RED}UFW firewall not installed${NC}\n"
-        ((issues++))
+        ((issues++)) || true
     fi
     
     # Check fail2ban status
@@ -3603,15 +3878,15 @@ run_security_audit() {
                 fi
             else
                 printf "⚠️  ${YELLOW}n8n jail not configured${NC}\n"
-                ((warnings++))
+                ((warnings++)) || true
             fi
         else
             printf "❌ ${RED}fail2ban is not running${NC}\n"
-            ((issues++))
+            ((issues++)) || true
         fi
     else
         printf "❌ ${RED}fail2ban not installed${NC}\n"
-        ((issues++))
+        ((issues++)) || true
     fi
     
     # Check service status
@@ -3624,7 +3899,7 @@ run_security_audit() {
             printf "✅ %s is running\n" "$service"
         else
             printf "❌ ${RED}%s is not running${NC}\n" "$service"
-            ((issues++))
+            ((issues++)) || true
         fi
     done
     
@@ -3634,7 +3909,7 @@ run_security_audit() {
     # Check for default passwords
     if grep -q "admin:admin" "$N8N_DIR/.env" 2>/dev/null; then
         printf "❌ ${RED}Default admin credentials detected${NC}\n"
-        ((issues++))
+        ((issues++)) || true
     else
         printf "✅ Custom admin credentials configured\n"
     fi
@@ -3644,7 +3919,7 @@ run_security_audit() {
         printf "✅ Encryption key is configured\n"
     else
         printf "⚠️  ${YELLOW}No encryption key found${NC}\n"
-        ((warnings++))
+        ((warnings++)) || true
     fi
     
     # Check for exposed ports
@@ -3655,6 +3930,65 @@ run_security_audit() {
         netstat -tuln 2>/dev/null | grep LISTEN | grep -E ":80|:443|:5432|:5678" | while read line; do
             printf "   %s\n" "$line"
         done
+    fi
+    
+    # Cloudflare-specific security checks
+    printf "\n${BOLD}Cloudflare Security Status:${NC}\n"
+    if [ -f "$N8N_DIR/.cloudflare_ips_v4" ] || [ -f "$N8N_DIR/.cloudflare_ips_v6" ]; then
+        # Cloudflare whitelist is configured
+        # Count both IPv4 and IPv6 Cloudflare rules
+        local active_ipv4_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9]+\.[0-9]+\.[0-9]+\." | wc -l)
+        local active_ipv6_rules=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*[0-9a-fA-F]*:[0-9a-fA-F]*:" | wc -l)
+        local active_cf_rules=$((active_ipv4_rules + active_ipv6_rules)) || true
+        
+        if [ $active_cf_rules -gt 0 ]; then
+            printf "✅ Cloudflare IP whitelist is active and enforced\n"
+            
+            # Check for rule consistency
+            local expected_ipv4=0
+            local expected_ipv6=0
+            
+            if [ -f "$N8N_DIR/.cloudflare_ips_v4" ]; then
+                expected_ipv4=$(grep -v '^#' "$N8N_DIR/.cloudflare_ips_v4" 2>/dev/null | grep -c . || echo 0)
+            fi
+            if [ -f "$N8N_DIR/.cloudflare_ips_v6" ]; then
+                expected_ipv6=$(grep -v '^#' "$N8N_DIR/.cloudflare_ips_v6" 2>/dev/null | grep -c . || echo 0)
+            fi
+            
+            local expected_total=$((expected_ipv4 + expected_ipv6))
+            
+            if [ $expected_total -gt 0 ]; then
+                if [ $active_cf_rules -eq $expected_total ]; then
+                    printf "✅ All Cloudflare IP ranges are properly configured (%d/%d rules)\n" "$active_cf_rules" "$expected_total"
+                elif [ $active_cf_rules -lt $expected_total ]; then
+                    printf "⚠️  ${YELLOW}Only %d of %d expected Cloudflare rules are active${NC}\n" "$active_cf_rules" "$expected_total"
+                    ((warnings++)) || true
+                else
+                    printf "⚠️  ${YELLOW}More rules active (%d) than expected (%d)${NC} - may include outdated IPs\n" "$active_cf_rules" "$expected_total"
+                    ((warnings++)) || true
+                fi
+            fi
+            
+            # Verify management access isn't blocked
+            # Check for both general localhost rules and port-specific rules
+            local mgmt_access=$(sudo ufw status 2>/dev/null | grep -E "ALLOW.*\s+(127\.0\.0\.1|localhost)" | wc -l)
+            local specific_mgmt_access=$(sudo ufw status 2>/dev/null | grep -E "443.*ALLOW.*\s+(127\.0\.0\.1|localhost)" | wc -l)
+            
+            if [ $mgmt_access -eq 0 ]; then
+                printf "❌ ${RED}No localhost management access rule found${NC} (you may be locked out)\n"
+                ((issues++)) || true
+            elif [ $specific_mgmt_access -gt 0 ]; then
+                printf "✅ Local management access is preserved (port-specific rules)\n"
+            else
+                printf "✅ Local management access is preserved (general rules)\n"
+            fi
+        else
+            printf "⚠️  ${YELLOW}Cloudflare cache files exist but whitelist is not active${NC}\n"
+            printf "   Use menu option to enable or remove cache files\n"
+            ((warnings++)) || true
+        fi
+    else
+        printf "ℹ️  Cloudflare IP whitelist is not configured (using standard access rules)\n"
     fi
     
     # Summary

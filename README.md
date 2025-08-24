@@ -1,6 +1,6 @@
 # n8n Self-Hosted Master Script - Complete Lifecycle Management
 
-A comprehensive master script for deploying, managing, and maintaining n8n with PostgreSQL, Nginx, and automated features. This all-in-one solution handles installation, updates, backups, uninstallation, and complete environment management with no external port exposure required.
+A comprehensive master script for deploying, managing, and maintaining n8n with PostgreSQL, Nginx, and automated features. This all-in-one solution handles installation, updates, backups, uninstallation, and complete environment management. Supports both local-only deployment (no router port forwarding) and external access via Cloudflare proxy.
 
 ## 🚀 Features
 
@@ -39,7 +39,7 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
 ### 🏠 Dynamic IP & Home Server Features
 - **Smart DNS Management**: Automatic detection and preservation of CNAME records for dynamic IPs
 - **Synology DDoS Support**: Native support for synology.me, duckdns.org, no-ip.com services
-- **Closed Port Operation**: DNS-01 certificates + Cloudflare proxy = no open firewall ports needed
+- **Secure Port Configuration**: Port 443 restricted to Cloudflare IPs only for enhanced security
 - **Automatic IP Updates**: CNAME records follow dynamic DNS changes seamlessly
 - **Enhanced Migration**: Cross-system backup/restore with automatic IP/hostname adaptation
 
@@ -51,6 +51,20 @@ A comprehensive master script for deploying, managing, and maintaining n8n with 
   - 10GB available storage
   - Network connectivity
 - Regular user account with sudo privileges (don't run as root)
+
+### Port Requirements by Access Type
+
+**🏠 Local Network Access Only:**
+- Router/NAT: No port forwarding needed
+- UFW: Port 443 open for nginx (local network + localhost)
+
+**🌐 External Access via Cloudflare:**
+- Router/NAT: Port 443 forwarded to your server
+- UFW: Port 443 restricted to Cloudflare IPs + local network
+
+**🔒 Certificate Generation (DNS-01):**
+- Router/NAT: No ports needed (works via DNS API)
+- UFW: No additional ports required
 
 ## 🏗️ Architecture
 
@@ -741,8 +755,8 @@ Perfect for home servers, Synology NAS, and dynamic IP environments with enhance
 **🔄 CNAME + Cloudflare Proxy Setup:**
 - ✅ **Automatic IP Updates**: CNAME follows your dynamic DNS service (synology.me, duckdns.org)
 - ✅ **DDoS Protection**: Cloudflare proxy shields your real IP address
-- ✅ **Closed Firewall Ports**: No need to open port 443 on your router/firewall
-- ✅ **SSL Certificates**: DNS-01 challenge works behind closed ports
+- ✅ **Enhanced Security**: UFW restricts port 443 to Cloudflare IPs + local network only
+- ✅ **SSL Certificates**: DNS-01 challenge generates certificates without port 80
 - ✅ **No Manual Updates**: Dynamic IP changes handled automatically
 
 ### Example: Synology DDoS Setup
@@ -757,9 +771,10 @@ Issues: ❌ Exposed IP, ❌ No DDoS protection, ❌ Direct attacks possible
 **After n8n-master.sh with Cloudflare:**
 ```
 Internet → Cloudflare (DDoS protection) → Your Dynamic IP → n8n
-Router: Port 443 can be CLOSED (recommended)
+Router: Port 443 forwarded for external access
+UFW: Port 443 open, restricted to Cloudflare IPs + local network
 DNS: CNAME n8n.example.com → whycanti.synology.me (proxy enabled)
-Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Closed ports, ✅ Auto-updates
+Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Cloudflare-only external access, ✅ Auto-updates
 ```
 
 ### Setup Process for Dynamic IPs
@@ -782,10 +797,10 @@ Benefits: ✅ Hidden IP, ✅ DDoS protection, ✅ Closed ports, ✅ Auto-updates
    - Recommends keeping CNAME + enabling proxy
    - Select option 1: "Keep CNAME and enable Cloudflare proxy"
 
-4. **Optional: Close Firewall Port**:
-   - Your n8n is now protected by Cloudflare
-   - You can safely close port 443 on your router/firewall
-   - Traffic routes through Cloudflare's global network
+4. **Configure Firewall Security**:
+   - **Router**: Port 443 forwarding must be enabled for Cloudflare to connect
+   - **UFW**: Port 443 open and restricted to Cloudflare IPs (automatically configured)
+   - Traffic routes through Cloudflare's global network for enhanced security
 
 ### Supported Dynamic DNS Providers
 
@@ -819,7 +834,7 @@ The deployment implements an innovative dual certificate architecture that provi
 **🏢 External Domain Access (Let's Encrypt)**
 - Trusted by all browsers (no security warnings)
 - Automatic renewal every 90 days
-- DNS-01 challenge works behind closed ports/firewalls
+- DNS-01 challenge generates certificates without opening router ports
 - Perfect for production internet-facing deployments
 
 **🏠 Internal Network Access (Self-Signed)**  
@@ -850,12 +865,16 @@ The script now supports both self-signed certificates and Let's Encrypt with DNS
 - **Google Cloud DNS** - Automated with service account
 - **Manual DNS** - Works with any provider (GoDaddy, Namecheap, etc.)
 
-**Benefits of DNS-01 Challenge**:
-- ✅ **No ports required**: Port 443 can remain closed (unlike HTTP-01)
-- ✅ **Firewall friendly**: Works behind firewalls, NAT, and closed ports
+**Benefits of DNS-01 Challenge (for certificate generation)**:
+- ✅ **No port 80 required**: Certificates obtained via DNS (unlike HTTP-01)
+- ✅ **Firewall friendly**: Certificate generation works without inbound connections
 - ✅ **Dynamic IP compatible**: Perfect for home servers with changing IPs
 - ✅ **Wildcard support**: Can generate wildcard certificates
-- ✅ **More secure**: No HTTP endpoint exposure required
+- ✅ **More secure**: No HTTP endpoint exposure during certificate generation
+
+**Port Requirements**:
+- **Router/NAT**: Port 443 forwarding only needed for external access (can remain closed for local-only access)
+- **Software Firewall (UFW)**: Port 443 must be open for nginx to function (restricted to Cloudflare IPs + local network)
 
 #### Provider Setup Instructions:
 
